@@ -178,7 +178,13 @@ function computeRollingAverage(windowMs: number): number | undefined {
   let count = 0;
   for (let i = 0; i < hrRingBuffer.length; i++) {
     const s = hrRingBuffer[i];
-    if (s === undefined || s.t < cutoff) continue;
+    // bpm <= 0 samples are the HRM sensor's warm-up readings (confirmed
+    // on-device: ~10-15s of bpm=0 before the sensor locks on) - excluded
+    // here so they don't drag the displayed average artificially low right
+    // after a session starts. This is display-averaging-only: captureSample()
+    // still records every raw sample (including zeros) to hrRingBuffer and
+    // the persisted CSV, and the instant "Now" reading is untouched.
+    if (s === undefined || s.t < cutoff || s.bpm <= 0) continue;
     sum += s.bpm;
     count++;
   }
@@ -306,14 +312,23 @@ function stopSampling(): void {
 const STOP_ZONE_HEIGHT = 40;
 
 // Layout constants for the active-session screen's three stacked bpm rows
-// plus the activity name above them. First draft (Y-positions and label
-// wording are explicitly flagged "Ask First" in the story spec) - every
+// plus the activity name above them. First draft (Y-positions and font
+// scale are explicitly flagged "Ask First" in the polish spec) - every
 // prior screen-layout choice in this project has needed on-device visual
 // iteration (clipped text, misaligned labels), so expect the same here.
-const ACTIVITY_Y = 30;
-const NOW_Y = 58;
-const AVG_1MIN_Y = 80;
-const AVG_5MIN_Y = 102;
+// The activity name is now top-aligned at the very top of the screen
+// (where the removed "Current session:" label used to be), and the three
+// bpm rows are enlarged (scale 2) now that removing the label frees up
+// vertical space.
+const ACTIVITY_Y = 4;
+const NOW_Y = 44;
+const AVG_1MIN_Y = 72;
+const AVG_5MIN_Y = 100;
+// Half-height of each bpm row's clear-band (fillRect Y ± this), and the
+// font scale they're drawn at - shared by drawInstantReading and
+// drawRollingAverages so the three rows stay visually identical.
+const ROW_CLEAR_MARGIN = 10;
+const ROW_FONT_SCALE = 2;
 
 // Shared formatter for a labeled bpm row ("Now"/"1m"/"5m"), used by both
 // drawInstantReading and drawRollingAverages so all three rows render
@@ -341,9 +356,9 @@ function drawInstantReading(): void {
   const latest = getLatestHrSample();
   const bpm = latest === undefined ? undefined : Math.round(latest.bpm);
   g.setColor(g.theme.bg);
-  g.fillRect(0, NOW_Y - 8, w, NOW_Y + 8);
+  g.fillRect(0, NOW_Y - ROW_CLEAR_MARGIN, w, NOW_Y + ROW_CLEAR_MARGIN);
   g.setColor(g.theme.fg);
-  g.setFont("6x8", 1);
+  g.setFont("6x8", ROW_FONT_SCALE);
   g.setFontAlign(0, 0);
   g.drawString(formatBpmLine("Now", bpm), w / 2, NOW_Y);
   g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
@@ -357,10 +372,10 @@ function drawRollingAverages(): void {
   const avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
   const avg5 = computeRollingAverage(HR_AVG_5MIN_WINDOW_MS);
   g.setColor(g.theme.bg);
-  g.fillRect(0, AVG_1MIN_Y - 8, w, AVG_1MIN_Y + 8);
-  g.fillRect(0, AVG_5MIN_Y - 8, w, AVG_5MIN_Y + 8);
+  g.fillRect(0, AVG_1MIN_Y - ROW_CLEAR_MARGIN, w, AVG_1MIN_Y + ROW_CLEAR_MARGIN);
+  g.fillRect(0, AVG_5MIN_Y - ROW_CLEAR_MARGIN, w, AVG_5MIN_Y + ROW_CLEAR_MARGIN);
   g.setColor(g.theme.fg);
-  g.setFont("6x8", 1);
+  g.setFont("6x8", ROW_FONT_SCALE);
   g.setFontAlign(0, 0);
   g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
   g.drawString(formatBpmLine("5m", avg5), w / 2, AVG_5MIN_Y);
@@ -393,7 +408,7 @@ function showActivityMenu(): void {
 }
 
 // Hand-drawn (no E.showMessage) so no title-bar chrome is ever rendered via
-// E.showMessage's title argument or a menu's "" key -- "Current session:"
+// E.showMessage's title argument or a menu's "" key -- the activity name
 // below is this screen's own content, not a title bar. Also draws a
 // tappable "Stop session" zone at the bottom, whose height is compared
 // against touch y-coordinates in onSessionScreenTouch.
@@ -402,18 +417,13 @@ function drawActiveSessionScreen(activity: Activity): void {
   const h = g.getHeight();
   g.clear(); // resets fg/bg to g.theme.fg/g.theme.bg
 
-  // Label at scale 1: at scale 2 "Current session:" (17 chars) is ~204px,
-  // wider than the 176px screen, so a centered draw clips its left edge.
-  g.setFont("6x8", 1);
-  g.setFontAlign(0, -1);
-  g.drawString("Current session:", w / 2, 4);
-
-  // Activity name, independent of the label above it. Moved off dead-center
-  // (h/2) to ACTIVITY_Y to make room for the three stacked bpm rows below it
-  // (Now/1m/5m) - the single instant reading no longer has the screen to
-  // itself.
+  // Activity name, top-aligned at the very top of the screen - the
+  // "Current session:" label that used to occupy this spot is gone (the
+  // Stop-session button already makes the screen's purpose obvious), so the
+  // activity name now anchors at the label's old y=4 position instead of
+  // sharing the screen with it.
   g.setFont("6x8", 2);
-  g.setFontAlign(0, 0);
+  g.setFontAlign(0, -1);
   g.drawString(activity, w / 2, ACTIVITY_Y);
 
   // Instant HR reading plus 1-min/5-min rolling averages, stacked below the

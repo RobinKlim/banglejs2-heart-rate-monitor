@@ -63,7 +63,7 @@ function computeRollingAverage(windowMs) {
     var count = 0;
     for (var i = 0; i < hrRingBuffer.length; i++) {
         var s = hrRingBuffer[i];
-        if (s === undefined || s.t < cutoff)
+        if (s === undefined || s.t < cutoff || s.bpm <= 0)
             continue;
         sum += s.bpm;
         count++;
@@ -145,10 +145,12 @@ function stopSampling() {
     console.log("hrsessions: stopped");
 }
 var STOP_ZONE_HEIGHT = 40;
-var ACTIVITY_Y = 30;
-var NOW_Y = 58;
-var AVG_1MIN_Y = 80;
-var AVG_5MIN_Y = 102;
+var ACTIVITY_Y = 4;
+var NOW_Y = 44;
+var AVG_1MIN_Y = 72;
+var AVG_5MIN_Y = 100;
+var ROW_CLEAR_MARGIN = 10;
+var ROW_FONT_SCALE = 2;
 function formatBpmLine(label, value) {
     if (value === undefined || !isFinite(value))
         return label + ": -- bpm";
@@ -160,9 +162,9 @@ function drawInstantReading() {
     var latest = getLatestHrSample();
     var bpm = latest === undefined ? undefined : Math.round(latest.bpm);
     g.setColor(g.theme.bg);
-    g.fillRect(0, NOW_Y - 8, w, NOW_Y + 8);
+    g.fillRect(0, NOW_Y - ROW_CLEAR_MARGIN, w, NOW_Y + ROW_CLEAR_MARGIN);
     g.setColor(g.theme.fg);
-    g.setFont("6x8", 1);
+    g.setFont("6x8", ROW_FONT_SCALE);
     g.setFontAlign(0, 0);
     g.drawString(formatBpmLine("Now", bpm), w / 2, NOW_Y);
     g.setFontAlign(-1, -1);
@@ -172,10 +174,10 @@ function drawRollingAverages() {
     var avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
     var avg5 = computeRollingAverage(HR_AVG_5MIN_WINDOW_MS);
     g.setColor(g.theme.bg);
-    g.fillRect(0, AVG_1MIN_Y - 8, w, AVG_1MIN_Y + 8);
-    g.fillRect(0, AVG_5MIN_Y - 8, w, AVG_5MIN_Y + 8);
+    g.fillRect(0, AVG_1MIN_Y - ROW_CLEAR_MARGIN, w, AVG_1MIN_Y + ROW_CLEAR_MARGIN);
+    g.fillRect(0, AVG_5MIN_Y - ROW_CLEAR_MARGIN, w, AVG_5MIN_Y + ROW_CLEAR_MARGIN);
     g.setColor(g.theme.fg);
-    g.setFont("6x8", 1);
+    g.setFont("6x8", ROW_FONT_SCALE);
     g.setFontAlign(0, 0);
     g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
     g.drawString(formatBpmLine("5m", avg5), w / 2, AVG_5MIN_Y);
@@ -206,11 +208,8 @@ function drawActiveSessionScreen(activity) {
     var w = g.getWidth();
     var h = g.getHeight();
     g.clear();
-    g.setFont("6x8", 1);
-    g.setFontAlign(0, -1);
-    g.drawString("Current session:", w / 2, 4);
     g.setFont("6x8", 2);
-    g.setFontAlign(0, 0);
+    g.setFontAlign(0, -1);
     g.drawString(activity, w / 2, ACTIVITY_Y);
     drawInstantReading();
     drawRollingAverages();
