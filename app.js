@@ -1,4 +1,4 @@
-var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating", "Yoga"];
+var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating"];
 var currentActivity;
 function openSessionFile(activity, startedEpochMs) {
     var date = new Date().toISOString().substr(0, 10).replace(/-/g, "");
@@ -23,23 +23,27 @@ function drawActiveSessionScreen(activity) {
     var w = g.getWidth();
     var h = g.getHeight();
     g.clear();
-    g.setColor(1, 1, 1);
     g.setFont("6x8", 1);
     g.setFontAlign(0, -1);
-    g.drawString("Active Session", w / 2, 4);
+    g.drawString("Current session:", w / 2, 4);
     g.setFont("6x8", 2);
     g.setFontAlign(0, 0);
     g.drawString(activity, w / 2, h / 2);
+    g.setColor(g.theme.fg);
     g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
-    g.setColor(0, 0, 0);
+    g.setColor(g.theme.bg);
     g.drawString("Stop session", w / 2, h - STOP_ZONE_HEIGHT / 2);
-    g.setColor(1, 1, 1);
+    g.setColor(g.theme.fg);
+    g.setFontAlign(-1, -1);
+    g.setFont("6x8", 1);
 }
 function showActiveSessionScreen(activity) {
     drawActiveSessionScreen(activity);
     Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
 }
 function onActivitySelected(activity) {
+    if (currentActivity !== undefined)
+        return;
     var startedEpochMs = Math.round(Date.now());
     openSessionFile(activity, startedEpochMs);
     currentActivity = activity;

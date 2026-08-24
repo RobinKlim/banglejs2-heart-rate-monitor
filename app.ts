@@ -85,6 +85,7 @@ function drawActiveSessionScreen(activity: Activity): void {
 
   g.setColor(g.theme.fg);
   g.setFontAlign(-1, -1);
+  g.setFont("6x8", 1);
 }
 
 function showActiveSessionScreen(activity: Activity): void {
@@ -95,6 +96,7 @@ function showActiveSessionScreen(activity: Activity): void {
 // ===== Top-level wiring =====
 
 function onActivitySelected(activity: Activity): void {
+  if (currentActivity !== undefined) return;
   const startedEpochMs = Math.round(Date.now());
   openSessionFile(activity, startedEpochMs);
   currentActivity = activity;
