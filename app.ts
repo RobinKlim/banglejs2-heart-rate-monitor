@@ -7,10 +7,13 @@
 //   Sampling - HRM sampling (not yet implemented - Story 1.4/1.6)
 //   UI       - screen drawing, calls State/Sampling, never Storage
 //
-// This story (1.1) implements enough of State/Storage/UI for: app launch
-// shows the Activity menu, selecting an Activity opens a new Session File
-// and writes its header line, then shows a minimal confirmation screen.
-// Stopping/finalizing a Session is out of scope here (Story 1.2).
+// Story 1.1 implements enough of State/Storage/UI for: app launch shows the
+// Activity menu, selecting an Activity opens a new Session File and writes
+// its header line. Story 1.2 adds the active-session screen (hand-drawn,
+// no title/header) and its touch-driven "Stop session" zone, which resets
+// in-memory Session state and returns to the Activity menu. The Session
+// File itself is not touched on stop yet - the four-step stop sequence
+// (unsubscribe HRM, stop flush timer, flush queue, close file) is Story 1.5.
 
 // ===== State =====
 
@@ -40,6 +43,8 @@ function openSessionFile(activity: Activity, startedEpochMs: number): StorageFil
 
 // ===== UI =====
 
+const STOP_ZONE_HEIGHT = 40;
+
 function showActivityMenu(): void {
   const menu: Menu = {};
   ACTIVITIES.forEach((activity) => {
@@ -50,8 +55,41 @@ function showActivityMenu(): void {
   E.showMenu(menu);
 }
 
-function showSessionStartedScreen(activity: Activity): void {
-  E.showMessage(activity + "\nSession started", "hrsessions");
+// Hand-drawn (no E.showMessage) so no title-bar chrome is ever rendered via
+// E.showMessage's title argument or a menu's "" key -- "Current session:"
+// below is this screen's own content, not a title bar. Also draws a
+// tappable "Stop session" zone at the bottom, whose height is compared
+// against touch y-coordinates in onSessionScreenTouch.
+function drawActiveSessionScreen(activity: Activity): void {
+  const w = g.getWidth();
+  const h = g.getHeight();
+  g.clear(); // resets fg/bg to g.theme.fg/g.theme.bg
+
+  // Label at scale 1: at scale 2 "Current session:" (17 chars) is ~204px,
+  // wider than the 176px screen, so a centered draw clips its left edge.
+  g.setFont("6x8", 1);
+  g.setFontAlign(0, -1);
+  g.drawString("Current session:", w / 2, 4);
+
+  // Activity name dead-center on screen, independent of the label above it.
+  g.setFont("6x8", 2);
+  g.setFontAlign(0, 0);
+  g.drawString(activity, w / 2, h / 2);
+
+  // Stop zone: theme-inverted fill with theme-background-colored text, so
+  // it stays legible in both light and dark themes.
+  g.setColor(g.theme.fg);
+  g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
+  g.setColor(g.theme.bg);
+  g.drawString("Stop session", w / 2, h - STOP_ZONE_HEIGHT / 2);
+
+  g.setColor(g.theme.fg);
+  g.setFontAlign(-1, -1);
+}
+
+function showActiveSessionScreen(activity: Activity): void {
+  drawActiveSessionScreen(activity);
+  Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
 }
 
 // ===== Top-level wiring =====
@@ -61,7 +99,24 @@ function onActivitySelected(activity: Activity): void {
   openSessionFile(activity, startedEpochMs);
   currentActivity = activity;
   E.showMenu(); // remove the Activity menu
-  showSessionStartedScreen(activity);
+  showActiveSessionScreen(activity);
+}
+
+function onSessionScreenTouch(_button?: number, xy?: TouchCallbackXY): void {
+  if (xy && xy.y >= g.getHeight() - STOP_ZONE_HEIGHT) {
+    stopSession();
+  }
+}
+
+// Resets in-memory Session state and returns to the Activity menu. No
+// file-close call here - the Session File is left as-is (Story 1.5 owns the
+// four-step stop sequence). Clear the custom UI/touch handler before
+// switching screens so a stray touch can't retrigger this after the menu
+// is shown.
+function stopSession(): void {
+  currentActivity = undefined;
+  Bangle.setUI();
+  showActivityMenu();
 }
 
 showActivityMenu();

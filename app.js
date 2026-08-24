@@ -1,4 +1,4 @@
-var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating"];
+var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating", "Yoga"];
 var currentActivity;
 function openSessionFile(activity, startedEpochMs) {
     var date = new Date().toISOString().substr(0, 10).replace(/-/g, "");
@@ -9,6 +9,7 @@ function openSessionFile(activity, startedEpochMs) {
     file.write(activity + "," + startedEpochMs + "\n");
     return file;
 }
+var STOP_ZONE_HEIGHT = 40;
 function showActivityMenu() {
     var menu = {};
     ACTIVITIES.forEach(function (activity) {
@@ -18,14 +19,41 @@ function showActivityMenu() {
     });
     E.showMenu(menu);
 }
-function showSessionStartedScreen(activity) {
-    E.showMessage(activity + "\nSession started", "hrsessions");
+function drawActiveSessionScreen(activity) {
+    var w = g.getWidth();
+    var h = g.getHeight();
+    g.clear();
+    g.setColor(1, 1, 1);
+    g.setFont("6x8", 1);
+    g.setFontAlign(0, -1);
+    g.drawString("Active Session", w / 2, 4);
+    g.setFont("6x8", 2);
+    g.setFontAlign(0, 0);
+    g.drawString(activity, w / 2, h / 2);
+    g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
+    g.setColor(0, 0, 0);
+    g.drawString("Stop session", w / 2, h - STOP_ZONE_HEIGHT / 2);
+    g.setColor(1, 1, 1);
+}
+function showActiveSessionScreen(activity) {
+    drawActiveSessionScreen(activity);
+    Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
 }
 function onActivitySelected(activity) {
     var startedEpochMs = Math.round(Date.now());
     openSessionFile(activity, startedEpochMs);
     currentActivity = activity;
     E.showMenu();
-    showSessionStartedScreen(activity);
+    showActiveSessionScreen(activity);
+}
+function onSessionScreenTouch(_button, xy) {
+    if (xy && xy.y >= g.getHeight() - STOP_ZONE_HEIGHT) {
+        stopSession();
+    }
+}
+function stopSession() {
+    currentActivity = undefined;
+    Bangle.setUI();
+    showActivityMenu();
 }
 showActivityMenu();
