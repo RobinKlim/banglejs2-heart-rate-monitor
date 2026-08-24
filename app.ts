@@ -115,6 +115,40 @@ function stopSampling(): void {
 
 const STOP_ZONE_HEIGHT = 40;
 
+// Redraw timer for the instant HR reading band, independent of both the HRM
+// event handler and Sampling's own ~1s capture timer -- started alongside
+// the active-session screen and stopped in stopSession, mirroring the
+// Sampling timers' lifecycle exactly (started together, stopped together).
+let redrawIntervalId: IntervalId | undefined;
+
+// Repaints only its own small text band (never the whole screen) so the
+// activity name and Stop zone never flicker on every tick. Reads the latest
+// captured sample straight from Sampling; before the first real sample
+// lands this shows a placeholder, never a fabricated number.
+function drawInstantReading(): void {
+  const w = g.getWidth();
+  const y = g.getHeight() / 2 + 28; // between the activity name (h/2) and the Stop zone
+  const latest = getLatestHrSample();
+  const bpm = latest === undefined ? undefined : Math.round(latest.bpm);
+  const text = bpm === undefined || !isFinite(bpm) ? "-- bpm" : bpm + " bpm";
+  g.setColor(g.theme.bg);
+  g.fillRect(0, y - 8, w, y + 8);
+  g.setColor(g.theme.fg);
+  g.setFont("6x8", 1);
+  g.setFontAlign(0, 0);
+  g.drawString(text, w / 2, y);
+  g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
+}
+
+function startInstantReadingRedraw(): void {
+  redrawIntervalId = setInterval(drawInstantReading, 1000);
+}
+
+function stopInstantReadingRedraw(): void {
+  if (redrawIntervalId !== undefined) clearInterval(redrawIntervalId);
+  redrawIntervalId = undefined;
+}
+
 function showActivityMenu(): void {
   const menu: Menu = {};
   ACTIVITIES.forEach((activity) => {
@@ -146,11 +180,20 @@ function drawActiveSessionScreen(activity: Activity): void {
   g.setFontAlign(0, 0);
   g.drawString(activity, w / 2, h / 2);
 
+  // Instant HR reading band, between the activity name and the Stop zone --
+  // drawn once here so the placeholder is visible immediately; the redraw
+  // timer (started in showActiveSessionScreen) keeps it current afterwards.
+  drawInstantReading();
+
   // Stop zone: theme-inverted fill with theme-background-colored text, so
-  // it stays legible in both light and dark themes.
+  // it stays legible in both light and dark themes. Font/align set
+  // explicitly (not inherited from whatever drew before) since
+  // drawInstantReading() also touches both.
   g.setColor(g.theme.fg);
   g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
   g.setColor(g.theme.bg);
+  g.setFont("6x8", 2);
+  g.setFontAlign(0, 0);
   g.drawString("Stop session", w / 2, h - STOP_ZONE_HEIGHT / 2);
 
   g.setColor(g.theme.fg);
@@ -161,6 +204,7 @@ function drawActiveSessionScreen(activity: Activity): void {
 function showActiveSessionScreen(activity: Activity): void {
   drawActiveSessionScreen(activity);
   Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
+  startInstantReadingRedraw();
 }
 
 // ===== Top-level wiring =====
@@ -189,6 +233,7 @@ function onSessionScreenTouch(_button?: number, xy?: TouchCallbackXY): void {
 function stopSession(): void {
   currentActivity = undefined;
   stopSampling();
+  stopInstantReadingRedraw();
   Bangle.setUI();
   showActivityMenu();
 }

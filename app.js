@@ -48,6 +48,29 @@ function stopSampling() {
     hrRingBuffer = [];
 }
 var STOP_ZONE_HEIGHT = 40;
+var redrawIntervalId;
+function drawInstantReading() {
+    var w = g.getWidth();
+    var y = g.getHeight() / 2 + 28;
+    var latest = getLatestHrSample();
+    var bpm = latest === undefined ? undefined : Math.round(latest.bpm);
+    var text = bpm === undefined || !isFinite(bpm) ? "-- bpm" : bpm + " bpm";
+    g.setColor(g.theme.bg);
+    g.fillRect(0, y - 8, w, y + 8);
+    g.setColor(g.theme.fg);
+    g.setFont("6x8", 1);
+    g.setFontAlign(0, 0);
+    g.drawString(text, w / 2, y);
+    g.setFontAlign(-1, -1);
+}
+function startInstantReadingRedraw() {
+    redrawIntervalId = setInterval(drawInstantReading, 1000);
+}
+function stopInstantReadingRedraw() {
+    if (redrawIntervalId !== undefined)
+        clearInterval(redrawIntervalId);
+    redrawIntervalId = undefined;
+}
 function showActivityMenu() {
     var menu = {};
     ACTIVITIES.forEach(function (activity) {
@@ -67,9 +90,12 @@ function drawActiveSessionScreen(activity) {
     g.setFont("6x8", 2);
     g.setFontAlign(0, 0);
     g.drawString(activity, w / 2, h / 2);
+    drawInstantReading();
     g.setColor(g.theme.fg);
     g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
     g.setColor(g.theme.bg);
+    g.setFont("6x8", 2);
+    g.setFontAlign(0, 0);
     g.drawString("Stop session", w / 2, h - STOP_ZONE_HEIGHT / 2);
     g.setColor(g.theme.fg);
     g.setFontAlign(-1, -1);
@@ -78,6 +104,7 @@ function drawActiveSessionScreen(activity) {
 function showActiveSessionScreen(activity) {
     drawActiveSessionScreen(activity);
     Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
+    startInstantReadingRedraw();
 }
 function onActivitySelected(activity) {
     if (currentActivity !== undefined)
@@ -97,6 +124,7 @@ function onSessionScreenTouch(_button, xy) {
 function stopSession() {
     currentActivity = undefined;
     stopSampling();
+    stopInstantReadingRedraw();
     Bangle.setUI();
     showActivityMenu();
 }
