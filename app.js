@@ -2,26 +2,43 @@ var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating"];
 var currentActivity;
 function openSessionFile(activity, startedEpochMs) {
     var date = new Date().toISOString().substr(0, 10).replace(/-/g, "");
-    var existing = require("Storage").list(new RegExp("^hrsessions\\.log" + date));
-    var track = existing.length.toString(36);
-    var name = "hrsessions.log" + date + track + ".csv";
+    var prefix = "hrsessions.log" + date;
+    var existing = require("Storage").list(new RegExp("^" + prefix));
+    var maxTrack = -1;
+    for (var i = 0; i < existing.length; i++) {
+        var fname = existing[i];
+        if (fname === undefined)
+            continue;
+        var trackVal = parseInt(fname.charAt(prefix.length), 36);
+        if (!isNaN(trackVal) && trackVal > maxTrack)
+            maxTrack = trackVal;
+    }
+    var track = (maxTrack + 1).toString(36);
+    var name = prefix + track + ".csv";
     var file = require("Storage").open(name, "w");
     file.write(activity + "," + startedEpochMs + "\n");
+    console.log("hrsessions: opened " + name + " (" + activity + ")");
     return file;
 }
 var HR_SAMPLE_INTERVAL_MS = 1000;
 var HR_BUFFER_WINDOW_MS = 300000;
+var HR_FLUSH_INTERVAL_MS = 10000;
 var hrRingBuffer = [];
+var hrWriteQueue = [];
 var latestBpm;
 var sampleIntervalId;
+var flushIntervalId;
+var currentFile;
 function onHrmSample(hrm) {
-    latestBpm = hrm.bpm;
+    latestBpm = Math.round(hrm.bpm);
 }
 function captureSample() {
     if (latestBpm === undefined)
         return;
-    var now = Date.now();
-    hrRingBuffer.push({ t: now, bpm: latestBpm });
+    var now = Math.round(Date.now());
+    var sample = { t: now, bpm: latestBpm };
+    hrRingBuffer.push(sample);
+    hrWriteQueue.push(sample);
     var cutoff = now - HR_BUFFER_WINDOW_MS;
     while (hrRingBuffer.length > 0) {
         var oldest = hrRingBuffer[0];
@@ -33,19 +50,56 @@ function captureSample() {
 function getLatestHrSample() {
     return hrRingBuffer[hrRingBuffer.length - 1];
 }
-function startSampling() {
+function flushSamples() {
+    if (currentFile === undefined || hrWriteQueue.length === 0)
+        return;
+    var text = "";
+    for (var i = 0; i < hrWriteQueue.length; i++) {
+        var s = hrWriteQueue[i];
+        if (s === undefined)
+            continue;
+        text += s.t + "," + s.bpm + "\n";
+    }
+    currentFile.write(text);
+    console.log("hrsessions: flushed " + hrWriteQueue.length + " samples");
+    hrWriteQueue = [];
+}
+function startSampling(activity, startedEpochMs) {
     hrRingBuffer = [];
+    hrWriteQueue = [];
     latestBpm = undefined;
+    currentFile = openSessionFile(activity, startedEpochMs);
     Bangle.setHRMPower(true, "hrsessions");
     sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
+    flushIntervalId = setInterval(flushSamples, HR_FLUSH_INTERVAL_MS);
+}
+function logSessionFile() {
+    if (currentFile === undefined)
+        return;
+    var name = currentFile.name;
+    console.log("hrsessions: --- " + name + " ---");
+    var readFile = require("Storage").open(name, "r");
+    var line;
+    while ((line = readFile.readLine()) !== undefined) {
+        console.log(line);
+    }
+    console.log("hrsessions: --- end " + name + " ---");
 }
 function stopSampling() {
+    Bangle.setHRMPower(false, "hrsessions");
     if (sampleIntervalId !== undefined)
         clearInterval(sampleIntervalId);
+    if (flushIntervalId !== undefined)
+        clearInterval(flushIntervalId);
     sampleIntervalId = undefined;
-    Bangle.setHRMPower(false, "hrsessions");
+    flushIntervalId = undefined;
+    flushSamples();
+    logSessionFile();
+    currentFile = undefined;
     latestBpm = undefined;
     hrRingBuffer = [];
+    hrWriteQueue = [];
+    console.log("hrsessions: stopped");
 }
 var STOP_ZONE_HEIGHT = 40;
 var redrawIntervalId;
@@ -107,12 +161,13 @@ function showActiveSessionScreen(activity) {
     startInstantReadingRedraw();
 }
 function onActivitySelected(activity) {
-    if (currentActivity !== undefined)
+    if (currentActivity !== undefined) {
+        console.log("hrsessions: ignored " + activity + " tap - already active: " + currentActivity);
         return;
+    }
     var startedEpochMs = Math.round(Date.now());
-    openSessionFile(activity, startedEpochMs);
+    startSampling(activity, startedEpochMs);
     currentActivity = activity;
-    startSampling();
     E.showMenu();
     showActiveSessionScreen(activity);
 }
