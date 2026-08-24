@@ -4,7 +4,10 @@
 // wiring (see the architecture spine / epic context for the full design):
 //   State    - session data, leaf module, calls nothing else
 //   Storage  - Session File persistence, leaf module, calls nothing else
-//   Sampling - HRM sampling (not yet implemented - Story 1.4/1.6)
+//   Sampling - HRM sampling: throttles raw hardware events down to ~1/sec
+//              into a time-windowed ring buffer (Story 1.4). Persisting
+//              samples to the Session File is Story 1.5; rolling averages
+//              are Story 1.6.
 //   UI       - screen drawing, calls State/Sampling, never Storage
 //
 // Story 1.1 implements enough of State/Storage/UI for: app launch shows the
@@ -14,6 +17,9 @@
 // in-memory Session state and returns to the Activity menu. The Session
 // File itself is not touched on stop yet - the four-step stop sequence
 // (unsubscribe HRM, stop flush timer, flush queue, close file) is Story 1.5.
+// Story 1.4 adds the Sampling layer: HRM power and the ~1s capture timer
+// turn on in onActivitySelected and off in stopSession, so the sensor is
+// never left running once a Session ends.
 
 // ===== State =====
 
@@ -39,6 +45,70 @@ function openSessionFile(activity: Activity, startedEpochMs: number): StorageFil
   const file = require("Storage").open(name, "w");
   file.write(activity + "," + startedEpochMs + "\n");
   return file;
+}
+
+// ===== Sampling =====
+
+type HrSample = { t: number; bpm: number };
+
+const HR_SAMPLE_INTERVAL_MS = 1000;
+const HR_BUFFER_WINDOW_MS = 300000; // 300s
+
+// Time-windowed ring buffer of captured samples, the sole source for the
+// live instant reading (and, in Story 1.6, the 1-min/5-min rolling
+// averages). Evicts by timestamp, not by a fixed slot count.
+let hrRingBuffer: HrSample[] = [];
+
+// Latest raw reading from the HRM hardware, updated on every 'HRM' event.
+// Cheap store only - no buffer writes here, so a slow future consumer of
+// the buffer can never delay sample processing.
+let latestBpm: number | undefined;
+
+let sampleIntervalId: IntervalId | undefined;
+
+function onHrmSample(hrm: { bpm: number; confidence: number; raw: Uint8Array }): void {
+  latestBpm = hrm.bpm;
+}
+
+// Runs on its own ~1s timer (not synchronously inside the HRM handler) and
+// pushes the latest raw reading into the ring buffer, throttling the raw
+// hardware event rate down to one sample per second.
+function captureSample(): void {
+  if (latestBpm === undefined) return;
+  const now = Date.now();
+  hrRingBuffer.push({ t: now, bpm: latestBpm });
+  const cutoff = now - HR_BUFFER_WINDOW_MS;
+  while (hrRingBuffer.length > 0) {
+    const oldest = hrRingBuffer[0];
+    if (oldest === undefined || oldest.t >= cutoff) break;
+    hrRingBuffer.shift();
+  }
+}
+
+// Accessor for the most recent captured sample - the interface the
+// deferred display story (and manual on-device verification) uses.
+function getLatestHrSample(): HrSample | undefined {
+  return hrRingBuffer[hrRingBuffer.length - 1];
+}
+
+// Powers on the HRM sensor and starts the ~1s capture timer. Resets the
+// ring buffer so a new Session never sees stale samples from a previous
+// one.
+function startSampling(): void {
+  hrRingBuffer = [];
+  latestBpm = undefined;
+  Bangle.setHRMPower(true, "hrsessions");
+  sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
+}
+
+// Powers off the HRM sensor and clears the capture timer - HRM is never
+// left running once a Session ends.
+function stopSampling(): void {
+  if (sampleIntervalId !== undefined) clearInterval(sampleIntervalId);
+  sampleIntervalId = undefined;
+  Bangle.setHRMPower(false, "hrsessions");
+  latestBpm = undefined;
+  hrRingBuffer = []; // don't let a stale reading answer getLatestHrSample() between sessions
 }
 
 // ===== UI =====
@@ -100,6 +170,7 @@ function onActivitySelected(activity: Activity): void {
   const startedEpochMs = Math.round(Date.now());
   openSessionFile(activity, startedEpochMs);
   currentActivity = activity;
+  startSampling();
   E.showMenu(); // remove the Activity menu
   showActiveSessionScreen(activity);
 }
@@ -117,8 +188,14 @@ function onSessionScreenTouch(_button?: number, xy?: TouchCallbackXY): void {
 // is shown.
 function stopSession(): void {
   currentActivity = undefined;
+  stopSampling();
   Bangle.setUI();
   showActivityMenu();
 }
+
+// Registered once at module load, not per-session - it's cheap and inert
+// whenever the HRM is powered off, so there's no need to add/remove it per
+// start/stop and no risk of listener accumulation across sessions.
+Bangle.on("HRM", onHrmSample);
 
 showActivityMenu();

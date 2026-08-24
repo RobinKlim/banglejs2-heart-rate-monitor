@@ -9,6 +9,44 @@ function openSessionFile(activity, startedEpochMs) {
     file.write(activity + "," + startedEpochMs + "\n");
     return file;
 }
+var HR_SAMPLE_INTERVAL_MS = 1000;
+var HR_BUFFER_WINDOW_MS = 300000;
+var hrRingBuffer = [];
+var latestBpm;
+var sampleIntervalId;
+function onHrmSample(hrm) {
+    latestBpm = hrm.bpm;
+}
+function captureSample() {
+    if (latestBpm === undefined)
+        return;
+    var now = Date.now();
+    hrRingBuffer.push({ t: now, bpm: latestBpm });
+    var cutoff = now - HR_BUFFER_WINDOW_MS;
+    while (hrRingBuffer.length > 0) {
+        var oldest = hrRingBuffer[0];
+        if (oldest === undefined || oldest.t >= cutoff)
+            break;
+        hrRingBuffer.shift();
+    }
+}
+function getLatestHrSample() {
+    return hrRingBuffer[hrRingBuffer.length - 1];
+}
+function startSampling() {
+    hrRingBuffer = [];
+    latestBpm = undefined;
+    Bangle.setHRMPower(true, "hrsessions");
+    sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
+}
+function stopSampling() {
+    if (sampleIntervalId !== undefined)
+        clearInterval(sampleIntervalId);
+    sampleIntervalId = undefined;
+    Bangle.setHRMPower(false, "hrsessions");
+    latestBpm = undefined;
+    hrRingBuffer = [];
+}
 var STOP_ZONE_HEIGHT = 40;
 function showActivityMenu() {
     var menu = {};
@@ -47,6 +85,7 @@ function onActivitySelected(activity) {
     var startedEpochMs = Math.round(Date.now());
     openSessionFile(activity, startedEpochMs);
     currentActivity = activity;
+    startSampling();
     E.showMenu();
     showActiveSessionScreen(activity);
 }
@@ -57,7 +96,9 @@ function onSessionScreenTouch(_button, xy) {
 }
 function stopSession() {
     currentActivity = undefined;
+    stopSampling();
     Bangle.setUI();
     showActivityMenu();
 }
+Bangle.on("HRM", onHrmSample);
 showActivityMenu();
