@@ -7,8 +7,8 @@
 //   Sampling - HRM sampling: throttles raw hardware events down to ~1/sec
 //              into a time-windowed ring buffer (Story 1.4) and a
 //              since-last-flush queue that is periodically written to the
-//              Session File (Story 1.5). Rolling averages are Story 1.6;
-//              size-triggered file rotation is a follow-up spec.
+//              Session File (Story 1.5), with size-triggered rotation to a
+//              new file under the same Session before ~130KB.
 //   UI       - screen drawing, calls State/Sampling, never Storage
 //
 // Story 1.1 implements enough of State/Storage/UI for: app launch shows the
@@ -22,6 +22,9 @@
 // into Sampling's startSampling() and implements the epic's exact 4-step
 // stop sequence (HRM off, timers cleared, final flush, file reference
 // dropped), so nothing captured is ever left unwritten when a Session ends.
+// A follow-up spec adds size-triggered rotation: flushSamples() opens a new
+// file under the same Session (same header, next track letter) before a
+// batch would push the current file past ~130KB.
 
 // ===== State =====
 
@@ -74,6 +77,9 @@ const HR_BUFFER_WINDOW_MS = 300000; // 300s
 // interrupted by reset/power loss (accepted epic behavior), so this just
 // bounds how much of the tail end of a Session could be lost in that case.
 const HR_FLUSH_INTERVAL_MS = 10000;
+// ~122KB, comfortably under the epic's ~130KB BLE-transfer memory-crash
+// threshold with margin for the batch that triggers the check.
+const HR_ROTATION_THRESHOLD_BYTES = 125000;
 
 // Time-windowed ring buffer of captured samples, the sole source for the
 // live instant reading (and, in Story 1.6, the 1-min/5-min rolling
@@ -98,6 +104,25 @@ let flushIntervalId: IntervalId | undefined;
 // Sampling is the sole owner of Storage.open() - see startSampling/
 // stopSampling below.
 let currentFile: StorageFile | undefined;
+
+// Every filename opened this Session, in order (the first file plus any
+// rotations) - lets logSessionFile() dump the whole Session, not just
+// whichever file happens to be current when it's stopped.
+let sessionFileNames: string[] = [];
+
+// The running Session's activity/start-epoch, captured once in
+// startSampling() and reused verbatim as the header of every rotated file
+// (see rotateSessionFile below) - a rotated file is fully self-describing
+// on its own, with no cross-file bookkeeping.
+let sessionActivity: Activity | undefined;
+let sessionStartedEpochMs: number | undefined;
+
+// In-memory running byte count of currentFile, checked against
+// HR_ROTATION_THRESHOLD_BYTES on every flush instead of calling
+// StorageFile.getLength() per flush (documented as slow). Established via
+// one getLength() call right after opening or rotating a file, then kept
+// current by adding each flushed batch's length.
+let currentFileSize = 0;
 
 // Rounded here, once, at the point bpm first enters the system, so every
 // downstream consumer (ring buffer, write queue, persisted CSV rows) sees
@@ -133,11 +158,29 @@ function getLatestHrSample(): HrSample | undefined {
   return hrRingBuffer[hrRingBuffer.length - 1];
 }
 
+// Opens a new file under the same Session, reusing the exact same header
+// (sessionActivity/sessionStartedEpochMs, captured once in startSampling)
+// so the rotated file is fully self-describing on its own. Reuses
+// openSessionFile()'s gap-safe track scheme (Story 1.5) for the new file's
+// name, so a collision-free name is automatic. No-ops if called outside an
+// active Session (sessionActivity/sessionStartedEpochMs unset) - can't
+// happen mid-Session, since both are only cleared in stopSampling().
+function rotateSessionFile(): void {
+  if (sessionActivity === undefined || sessionStartedEpochMs === undefined) return;
+  currentFile = openSessionFile(sessionActivity, sessionStartedEpochMs);
+  currentFileSize = currentFile.getLength();
+  const name: string = (currentFile as any).name;
+  sessionFileNames.push(name);
+  console.log("hrsessions: rotated to " + name);
+}
+
 // Writes everything queued since the last flush to the Session File as
 // `t,bpm` rows, then clears the queue. The queue is only cleared once
 // write() above has completed without throwing - if it throws, the queue
 // stays populated and is retried (folded in with newly-arrived samples) on
-// the next flush tick, for free, via normal JS control flow.
+// the next flush tick, for free, via normal JS control flow. Rotates to a
+// new file first, before writing, if this batch would push the current
+// file past HR_ROTATION_THRESHOLD_BYTES.
 function flushSamples(): void {
   if (currentFile === undefined || hrWriteQueue.length === 0) return;
   let text = "";
@@ -146,7 +189,18 @@ function flushSamples(): void {
     if (s === undefined) continue;
     text += s.t + "," + s.bpm + "\n";
   }
-  currentFile.write(text);
+  // text.length as a byte count assumes ASCII-only content (digits, commas,
+  // newlines) - true for the current t,bpm row format. A future non-ASCII
+  // field would need a different size measure here.
+  if (currentFileSize + text.length > HR_ROTATION_THRESHOLD_BYTES) {
+    rotateSessionFile();
+  }
+  // Non-null assertion: rotateSessionFile() always assigns a real file (it
+  // no-ops only if sessionActivity/sessionStartedEpochMs are unset, which
+  // can't happen mid-Session), but calling it invalidates TS's narrowing of
+  // the top-of-function `currentFile === undefined` check.
+  currentFile!.write(text);
+  currentFileSize += text.length;
   console.log("hrsessions: flushed " + hrWriteQueue.length + " samples");
   hrWriteQueue = [];
 }
@@ -160,7 +214,11 @@ function startSampling(activity: Activity, startedEpochMs: number): void {
   hrRingBuffer = [];
   hrWriteQueue = [];
   latestBpm = undefined;
+  sessionActivity = activity;
+  sessionStartedEpochMs = startedEpochMs;
   currentFile = openSessionFile(activity, startedEpochMs);
+  currentFileSize = currentFile.getLength();
+  sessionFileNames = [(currentFile as any).name];
   Bangle.setHRMPower(true, "hrsessions");
   sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
   flushIntervalId = setInterval(flushSamples, HR_FLUSH_INTERVAL_MS);
@@ -174,21 +232,24 @@ function startSampling(activity: Activity, startedEpochMs: number): void {
 // both timers cleared; (3) one final flushSamples() call to catch
 // anything queued since the last periodic flush; (4) the file reference
 // dropped (there is no .close() - "closing" means "stop writing to it").
-// Debug aid: dumps the just-finalized Session File's full contents to the
-// console, so a single console copy after Stop shows everything needed to
-// confirm a test - no manual read-back commands required. `.name` isn't in
+// Debug aid: dumps every file from the just-finalized Session (the first
+// file plus any rotations - see sessionFileNames) to the console, so a
+// single console copy after Stop shows everything needed to confirm a
+// test, not just whichever file happens to be current. `.name` isn't in
 // the vendored StorageFile type but is present at runtime (confirmed via
 // Espruino's own object inspector output).
 function logSessionFile(): void {
-  if (currentFile === undefined) return;
-  const name: string = (currentFile as any).name;
-  console.log("hrsessions: --- " + name + " ---");
-  const readFile = require("Storage").open(name, "r");
-  let line: string | undefined;
-  while ((line = readFile.readLine()) !== undefined) {
-    console.log(line);
+  for (let i = 0; i < sessionFileNames.length; i++) {
+    const name = sessionFileNames[i];
+    if (name === undefined) continue;
+    console.log("hrsessions: --- " + name + " ---");
+    const readFile = require("Storage").open(name, "r");
+    let line: string | undefined;
+    while ((line = readFile.readLine()) !== undefined) {
+      console.log(line);
+    }
+    console.log("hrsessions: --- end " + name + " ---");
   }
-  console.log("hrsessions: --- end " + name + " ---");
 }
 
 function stopSampling(): void {
@@ -203,6 +264,13 @@ function stopSampling(): void {
   latestBpm = undefined;
   hrRingBuffer = []; // don't let a stale reading answer getLatestHrSample() between sessions
   hrWriteQueue = [];
+  // Don't let stale state (same reasoning as the ring buffer/write queue
+  // above) answer between Sessions or feed a rotation after this Session
+  // has ended.
+  sessionActivity = undefined;
+  sessionStartedEpochMs = undefined;
+  currentFileSize = 0;
+  sessionFileNames = [];
   console.log("hrsessions: stopped");
 }
 

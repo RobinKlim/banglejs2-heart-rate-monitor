@@ -23,12 +23,17 @@ function openSessionFile(activity, startedEpochMs) {
 var HR_SAMPLE_INTERVAL_MS = 1000;
 var HR_BUFFER_WINDOW_MS = 300000;
 var HR_FLUSH_INTERVAL_MS = 10000;
+var HR_ROTATION_THRESHOLD_BYTES = 125000;
 var hrRingBuffer = [];
 var hrWriteQueue = [];
 var latestBpm;
 var sampleIntervalId;
 var flushIntervalId;
 var currentFile;
+var sessionFileNames = [];
+var sessionActivity;
+var sessionStartedEpochMs;
+var currentFileSize = 0;
 function onHrmSample(hrm) {
     latestBpm = Math.round(hrm.bpm);
 }
@@ -50,6 +55,15 @@ function captureSample() {
 function getLatestHrSample() {
     return hrRingBuffer[hrRingBuffer.length - 1];
 }
+function rotateSessionFile() {
+    if (sessionActivity === undefined || sessionStartedEpochMs === undefined)
+        return;
+    currentFile = openSessionFile(sessionActivity, sessionStartedEpochMs);
+    currentFileSize = currentFile.getLength();
+    var name = currentFile.name;
+    sessionFileNames.push(name);
+    console.log("hrsessions: rotated to " + name);
+}
 function flushSamples() {
     if (currentFile === undefined || hrWriteQueue.length === 0)
         return;
@@ -60,7 +74,11 @@ function flushSamples() {
             continue;
         text += s.t + "," + s.bpm + "\n";
     }
+    if (currentFileSize + text.length > HR_ROTATION_THRESHOLD_BYTES) {
+        rotateSessionFile();
+    }
     currentFile.write(text);
+    currentFileSize += text.length;
     console.log("hrsessions: flushed " + hrWriteQueue.length + " samples");
     hrWriteQueue = [];
 }
@@ -68,22 +86,28 @@ function startSampling(activity, startedEpochMs) {
     hrRingBuffer = [];
     hrWriteQueue = [];
     latestBpm = undefined;
+    sessionActivity = activity;
+    sessionStartedEpochMs = startedEpochMs;
     currentFile = openSessionFile(activity, startedEpochMs);
+    currentFileSize = currentFile.getLength();
+    sessionFileNames = [currentFile.name];
     Bangle.setHRMPower(true, "hrsessions");
     sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
     flushIntervalId = setInterval(flushSamples, HR_FLUSH_INTERVAL_MS);
 }
 function logSessionFile() {
-    if (currentFile === undefined)
-        return;
-    var name = currentFile.name;
-    console.log("hrsessions: --- " + name + " ---");
-    var readFile = require("Storage").open(name, "r");
-    var line;
-    while ((line = readFile.readLine()) !== undefined) {
-        console.log(line);
+    for (var i = 0; i < sessionFileNames.length; i++) {
+        var name = sessionFileNames[i];
+        if (name === undefined)
+            continue;
+        console.log("hrsessions: --- " + name + " ---");
+        var readFile = require("Storage").open(name, "r");
+        var line = void 0;
+        while ((line = readFile.readLine()) !== undefined) {
+            console.log(line);
+        }
+        console.log("hrsessions: --- end " + name + " ---");
     }
-    console.log("hrsessions: --- end " + name + " ---");
 }
 function stopSampling() {
     Bangle.setHRMPower(false, "hrsessions");
@@ -99,6 +123,10 @@ function stopSampling() {
     latestBpm = undefined;
     hrRingBuffer = [];
     hrWriteQueue = [];
+    sessionActivity = undefined;
+    sessionStartedEpochMs = undefined;
+    currentFileSize = 0;
+    sessionFileNames = [];
     console.log("hrsessions: stopped");
 }
 var STOP_ZONE_HEIGHT = 40;
