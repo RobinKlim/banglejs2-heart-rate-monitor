@@ -10,7 +10,10 @@ a Session File is created on-watch and tagged with the chosen activity
 and start time.
 
 Session Files are CSV, named `hrsessions.log<date><track>.csv`, and
-persist in the watch's storage until exported.
+persist in the watch's storage.
+
+Stopping/finalizing a session and exporting it off-watch are not
+implemented yet (planned for later stories).
 
 ## Development
 
