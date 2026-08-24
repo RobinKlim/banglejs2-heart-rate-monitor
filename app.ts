@@ -71,7 +71,15 @@ function openSessionFile(activity: Activity, startedEpochMs: number): StorageFil
 type HrSample = { t: number; bpm: number };
 
 const HR_SAMPLE_INTERVAL_MS = 1000;
+// Also relied on verbatim by HR_AVG_5MIN_WINDOW_MS below (Story 1.6's "5m"
+// label) - changing this for retention/memory reasons would silently change
+// what "5m" means on screen too.
 const HR_BUFFER_WINDOW_MS = 300000; // 300s
+// Story 1.6's two rolling-average windows. The 5-min window reuses the ring
+// buffer's own eviction window verbatim (both are 300s) rather than defining
+// a second, independent constant that could drift out of sync with it.
+const HR_AVG_1MIN_WINDOW_MS = 60000;
+const HR_AVG_5MIN_WINDOW_MS = HR_BUFFER_WINDOW_MS;
 // 10s: batches writes without holding too much unflushed data at once. Not
 // a safety-critical number - no crash-recovery is attempted for a Session
 // interrupted by reset/power loss (accepted epic behavior), so this just
@@ -156,6 +164,25 @@ function captureSample(): void {
 // deferred display story (and manual on-device verification) uses.
 function getLatestHrSample(): HrSample | undefined {
   return hrRingBuffer[hrRingBuffer.length - 1];
+}
+
+// Plain arithmetic mean of whatever real samples in hrRingBuffer fall within
+// the last `windowMs` - no smoothing, no weighting, no interpolation for
+// gaps, no padding before a full window exists. Same undefined-safe loop
+// shape as the eviction loop in captureSample() above. Returns undefined
+// (never a fabricated number) until at least one real sample falls within
+// the window, mirroring the instant reading's existing placeholder pattern.
+function computeRollingAverage(windowMs: number): number | undefined {
+  const cutoff = Date.now() - windowMs;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < hrRingBuffer.length; i++) {
+    const s = hrRingBuffer[i];
+    if (s === undefined || s.t < cutoff) continue;
+    sum += s.bpm;
+    count++;
+  }
+  return count === 0 ? undefined : sum / count;
 }
 
 // Opens a new file under the same Session, reusing the exact same header
@@ -278,10 +305,31 @@ function stopSampling(): void {
 
 const STOP_ZONE_HEIGHT = 40;
 
-// Redraw timer for the instant HR reading band, independent of both the HRM
-// event handler and Sampling's own ~1s capture timer -- started alongside
-// the active-session screen and stopped in stopSession, mirroring the
-// Sampling timers' lifecycle exactly (started together, stopped together).
+// Layout constants for the active-session screen's three stacked bpm rows
+// plus the activity name above them. First draft (Y-positions and label
+// wording are explicitly flagged "Ask First" in the story spec) - every
+// prior screen-layout choice in this project has needed on-device visual
+// iteration (clipped text, misaligned labels), so expect the same here.
+const ACTIVITY_Y = 30;
+const NOW_Y = 58;
+const AVG_1MIN_Y = 80;
+const AVG_5MIN_Y = 102;
+
+// Shared formatter for a labeled bpm row ("Now"/"1m"/"5m"), used by both
+// drawInstantReading and drawRollingAverages so all three rows render
+// identically. Placeholder ("-- bpm"), never a fabricated number, until a
+// real value is available.
+function formatBpmLine(label: string, value: number | undefined): string {
+  if (value === undefined || !isFinite(value)) return label + ": -- bpm";
+  return label + ": " + Math.round(value) + " bpm";
+}
+
+// Redraw timer covering all three live bpm rows (instant, 1-min, 5-min),
+// independent of both the HRM event handler and Sampling's own ~1s capture
+// timer -- started alongside the active-session screen and stopped in
+// stopSession, mirroring the Sampling timers' lifecycle exactly (started
+// together, stopped together). One shared ~1Hz timer per the epic's stated
+// UI design, not three.
 let redrawIntervalId: IntervalId | undefined;
 
 // Repaints only its own small text band (never the whole screen) so the
@@ -290,24 +338,46 @@ let redrawIntervalId: IntervalId | undefined;
 // lands this shows a placeholder, never a fabricated number.
 function drawInstantReading(): void {
   const w = g.getWidth();
-  const y = g.getHeight() / 2 + 28; // between the activity name (h/2) and the Stop zone
   const latest = getLatestHrSample();
   const bpm = latest === undefined ? undefined : Math.round(latest.bpm);
-  const text = bpm === undefined || !isFinite(bpm) ? "-- bpm" : bpm + " bpm";
   g.setColor(g.theme.bg);
-  g.fillRect(0, y - 8, w, y + 8);
+  g.fillRect(0, NOW_Y - 8, w, NOW_Y + 8);
   g.setColor(g.theme.fg);
   g.setFont("6x8", 1);
   g.setFontAlign(0, 0);
-  g.drawString(text, w / 2, y);
+  g.drawString(formatBpmLine("Now", bpm), w / 2, NOW_Y);
   g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
 }
 
-function startInstantReadingRedraw(): void {
-  redrawIntervalId = setInterval(drawInstantReading, 1000);
+// Same clear-band-then-draw pattern as drawInstantReading, for the 1-min/
+// 5-min rows. Both are a plain arithmetic mean of hrRingBuffer samples
+// within their window (computeRollingAverage) - no smoothing, no weighting.
+function drawRollingAverages(): void {
+  const w = g.getWidth();
+  const avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
+  const avg5 = computeRollingAverage(HR_AVG_5MIN_WINDOW_MS);
+  g.setColor(g.theme.bg);
+  g.fillRect(0, AVG_1MIN_Y - 8, w, AVG_1MIN_Y + 8);
+  g.fillRect(0, AVG_5MIN_Y - 8, w, AVG_5MIN_Y + 8);
+  g.setColor(g.theme.fg);
+  g.setFont("6x8", 1);
+  g.setFontAlign(0, 0);
+  g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
+  g.drawString(formatBpmLine("5m", avg5), w / 2, AVG_5MIN_Y);
+  g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
 }
 
-function stopInstantReadingRedraw(): void {
+// Redraw-timer callback: repaints all three live bpm rows every tick.
+function redrawLiveReadings(): void {
+  drawInstantReading();
+  drawRollingAverages();
+}
+
+function startLiveReadingsRedraw(): void {
+  redrawIntervalId = setInterval(redrawLiveReadings, 1000);
+}
+
+function stopLiveReadingsRedraw(): void {
   if (redrawIntervalId !== undefined) clearInterval(redrawIntervalId);
   redrawIntervalId = undefined;
 }
@@ -338,15 +408,20 @@ function drawActiveSessionScreen(activity: Activity): void {
   g.setFontAlign(0, -1);
   g.drawString("Current session:", w / 2, 4);
 
-  // Activity name dead-center on screen, independent of the label above it.
+  // Activity name, independent of the label above it. Moved off dead-center
+  // (h/2) to ACTIVITY_Y to make room for the three stacked bpm rows below it
+  // (Now/1m/5m) - the single instant reading no longer has the screen to
+  // itself.
   g.setFont("6x8", 2);
   g.setFontAlign(0, 0);
-  g.drawString(activity, w / 2, h / 2);
+  g.drawString(activity, w / 2, ACTIVITY_Y);
 
-  // Instant HR reading band, between the activity name and the Stop zone --
-  // drawn once here so the placeholder is visible immediately; the redraw
-  // timer (started in showActiveSessionScreen) keeps it current afterwards.
+  // Instant HR reading plus 1-min/5-min rolling averages, stacked below the
+  // activity name -- drawn once here so all three placeholders are visible
+  // immediately, not just after the first redraw tick; the redraw timer
+  // (started in showActiveSessionScreen) keeps them current afterwards.
   drawInstantReading();
+  drawRollingAverages();
 
   // Stop zone: theme-inverted fill with theme-background-colored text, so
   // it stays legible in both light and dark themes. Font/align set
@@ -367,7 +442,7 @@ function drawActiveSessionScreen(activity: Activity): void {
 function showActiveSessionScreen(activity: Activity): void {
   drawActiveSessionScreen(activity);
   Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
-  startInstantReadingRedraw();
+  startLiveReadingsRedraw();
 }
 
 // ===== Top-level wiring =====
@@ -402,7 +477,7 @@ function onSessionScreenTouch(_button?: number, xy?: TouchCallbackXY): void {
 function stopSession(): void {
   currentActivity = undefined;
   stopSampling();
-  stopInstantReadingRedraw();
+  stopLiveReadingsRedraw();
   Bangle.setUI();
   showActivityMenu();
 }

@@ -22,6 +22,8 @@ function openSessionFile(activity, startedEpochMs) {
 }
 var HR_SAMPLE_INTERVAL_MS = 1000;
 var HR_BUFFER_WINDOW_MS = 300000;
+var HR_AVG_1MIN_WINDOW_MS = 60000;
+var HR_AVG_5MIN_WINDOW_MS = HR_BUFFER_WINDOW_MS;
 var HR_FLUSH_INTERVAL_MS = 10000;
 var HR_ROTATION_THRESHOLD_BYTES = 125000;
 var hrRingBuffer = [];
@@ -54,6 +56,19 @@ function captureSample() {
 }
 function getLatestHrSample() {
     return hrRingBuffer[hrRingBuffer.length - 1];
+}
+function computeRollingAverage(windowMs) {
+    var cutoff = Date.now() - windowMs;
+    var sum = 0;
+    var count = 0;
+    for (var i = 0; i < hrRingBuffer.length; i++) {
+        var s = hrRingBuffer[i];
+        if (s === undefined || s.t < cutoff)
+            continue;
+        sum += s.bpm;
+        count++;
+    }
+    return count === 0 ? undefined : sum / count;
 }
 function rotateSessionFile() {
     if (sessionActivity === undefined || sessionStartedEpochMs === undefined)
@@ -130,25 +145,50 @@ function stopSampling() {
     console.log("hrsessions: stopped");
 }
 var STOP_ZONE_HEIGHT = 40;
+var ACTIVITY_Y = 30;
+var NOW_Y = 58;
+var AVG_1MIN_Y = 80;
+var AVG_5MIN_Y = 102;
+function formatBpmLine(label, value) {
+    if (value === undefined || !isFinite(value))
+        return label + ": -- bpm";
+    return label + ": " + Math.round(value) + " bpm";
+}
 var redrawIntervalId;
 function drawInstantReading() {
     var w = g.getWidth();
-    var y = g.getHeight() / 2 + 28;
     var latest = getLatestHrSample();
     var bpm = latest === undefined ? undefined : Math.round(latest.bpm);
-    var text = bpm === undefined || !isFinite(bpm) ? "-- bpm" : bpm + " bpm";
     g.setColor(g.theme.bg);
-    g.fillRect(0, y - 8, w, y + 8);
+    g.fillRect(0, NOW_Y - 8, w, NOW_Y + 8);
     g.setColor(g.theme.fg);
     g.setFont("6x8", 1);
     g.setFontAlign(0, 0);
-    g.drawString(text, w / 2, y);
+    g.drawString(formatBpmLine("Now", bpm), w / 2, NOW_Y);
     g.setFontAlign(-1, -1);
 }
-function startInstantReadingRedraw() {
-    redrawIntervalId = setInterval(drawInstantReading, 1000);
+function drawRollingAverages() {
+    var w = g.getWidth();
+    var avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
+    var avg5 = computeRollingAverage(HR_AVG_5MIN_WINDOW_MS);
+    g.setColor(g.theme.bg);
+    g.fillRect(0, AVG_1MIN_Y - 8, w, AVG_1MIN_Y + 8);
+    g.fillRect(0, AVG_5MIN_Y - 8, w, AVG_5MIN_Y + 8);
+    g.setColor(g.theme.fg);
+    g.setFont("6x8", 1);
+    g.setFontAlign(0, 0);
+    g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
+    g.drawString(formatBpmLine("5m", avg5), w / 2, AVG_5MIN_Y);
+    g.setFontAlign(-1, -1);
 }
-function stopInstantReadingRedraw() {
+function redrawLiveReadings() {
+    drawInstantReading();
+    drawRollingAverages();
+}
+function startLiveReadingsRedraw() {
+    redrawIntervalId = setInterval(redrawLiveReadings, 1000);
+}
+function stopLiveReadingsRedraw() {
     if (redrawIntervalId !== undefined)
         clearInterval(redrawIntervalId);
     redrawIntervalId = undefined;
@@ -171,8 +211,9 @@ function drawActiveSessionScreen(activity) {
     g.drawString("Current session:", w / 2, 4);
     g.setFont("6x8", 2);
     g.setFontAlign(0, 0);
-    g.drawString(activity, w / 2, h / 2);
+    g.drawString(activity, w / 2, ACTIVITY_Y);
     drawInstantReading();
+    drawRollingAverages();
     g.setColor(g.theme.fg);
     g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
     g.setColor(g.theme.bg);
@@ -186,7 +227,7 @@ function drawActiveSessionScreen(activity) {
 function showActiveSessionScreen(activity) {
     drawActiveSessionScreen(activity);
     Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
-    startInstantReadingRedraw();
+    startLiveReadingsRedraw();
 }
 function onActivitySelected(activity) {
     if (currentActivity !== undefined) {
@@ -207,7 +248,7 @@ function onSessionScreenTouch(_button, xy) {
 function stopSession() {
     currentActivity = undefined;
     stopSampling();
-    stopInstantReadingRedraw();
+    stopLiveReadingsRedraw();
     Bangle.setUI();
     showActivityMenu();
 }
