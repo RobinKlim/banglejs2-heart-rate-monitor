@@ -1,0 +1,6 @@
+# typescript/.gitignore (vendored verbatim from espruino/BangleApps) uses
+# the pattern `./node_modules`, which is not a valid gitignore anchor (a
+# leading `./` is taken literally and never matches), so it fails to ignore
+# typescript/node_modules. This repo-root .gitignore covers the gap without
+# modifying that vendored file.
+typescript/node_modules/

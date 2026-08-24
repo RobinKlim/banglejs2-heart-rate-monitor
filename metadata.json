@@ -1,0 +1,16 @@
+{
+  "id": "hrsessions",
+  "name": "HR Sessions",
+  "shortName": "HR Sessions",
+  "version": "0.01",
+  "description": "Track heart-rate sessions by activity (Jogging, Biking, Sleeping, Eating) and save them to durable, appendable CSV Session Files on the watch.",
+  "tags": "tool,health",
+  "supports": ["BANGLEJS2"],
+  "readme": "README.md",
+  "storage": [
+    {"name":"hrsessions.app.js","url":"app.js"}
+  ],
+  "data": [
+    {"wildcard":"hrsessions.log*.csv","storageFile":true}
+  ]
+}
