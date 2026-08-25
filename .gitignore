@@ -4,7 +4,3 @@
 # typescript/node_modules. This repo-root .gitignore covers the gap without
 # modifying that vendored file.
 typescript/node_modules/
-
-# Local planning/spike notes and personal tooling — not part of the
-# store-submittable app repo
-local/
