@@ -1,4 +1,4 @@
-var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating"];
+var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating", "Walking", "Swimming"];
 var currentActivity;
 function openSessionFile(activity, startedEpochMs) {
     var date = new Date().toISOString().substr(0, 10).replace(/-/g, "");
@@ -148,47 +148,60 @@ function stopPersistence() {
     console.log("hrsessions: stopped");
 }
 var BUTTON_ZONE_HEIGHT = 40;
+var TRACKED_CONFIRMATION_DISMISS_MS = 2500;
 var ACTIVITY_Y = 4;
+var ACTIVITY_BAND_HEIGHT = 24;
 var NOW_Y = 44;
 var AVG_1MIN_Y = 72;
 var AVG_10MIN_Y = 100;
+var ACTIVE_SCREEN_ROW_Y_OFFSET = 8;
 var ROW_CLEAR_MARGIN = 10;
 var ROW_FONT_SCALE = 2;
+var COLOR_GREEN = "#00a000";
+var COLOR_RED = "#c00000";
+var COLOR_WHITE = "#ffffff";
+var COLOR_BLACK = "#000000";
 function formatBpmLine(label, value) {
     if (value === undefined || !isFinite(value))
         return label + ": -- bpm";
     return label + ": " + Math.round(value) + " bpm";
 }
 var redrawIntervalId;
-function drawInstantReading() {
+function drawInstantReading(yOffset) {
+    if (yOffset === void 0) { yOffset = 0; }
     var w = g.getWidth();
+    var y = NOW_Y + yOffset;
     var latest = getLatestHrSample();
     var bpm = latest === undefined ? undefined : Math.round(latest.bpm);
     g.setColor(g.theme.bg);
-    g.fillRect(0, NOW_Y - ROW_CLEAR_MARGIN, w, NOW_Y + ROW_CLEAR_MARGIN);
+    g.fillRect(0, y - ROW_CLEAR_MARGIN, w, y + ROW_CLEAR_MARGIN);
     g.setColor(g.theme.fg);
     g.setFont("6x8", ROW_FONT_SCALE);
     g.setFontAlign(0, 0);
-    g.drawString(formatBpmLine("Now", bpm), w / 2, NOW_Y);
+    g.drawString(formatBpmLine("Now", bpm), w / 2, y);
     g.setFontAlign(-1, -1);
 }
-function drawRollingAverages() {
+function drawRollingAverages(yOffset) {
+    if (yOffset === void 0) { yOffset = 0; }
     var w = g.getWidth();
     var avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
     var avg10 = computeRollingAverage(HR_AVG_10MIN_WINDOW_MS);
+    var y1 = AVG_1MIN_Y + yOffset;
+    var y10 = AVG_10MIN_Y + yOffset;
     g.setColor(g.theme.bg);
-    g.fillRect(0, AVG_1MIN_Y - ROW_CLEAR_MARGIN, w, AVG_1MIN_Y + ROW_CLEAR_MARGIN);
-    g.fillRect(0, AVG_10MIN_Y - ROW_CLEAR_MARGIN, w, AVG_10MIN_Y + ROW_CLEAR_MARGIN);
+    g.fillRect(0, y1 - ROW_CLEAR_MARGIN, w, y1 + ROW_CLEAR_MARGIN);
+    g.fillRect(0, y10 - ROW_CLEAR_MARGIN, w, y10 + ROW_CLEAR_MARGIN);
     g.setColor(g.theme.fg);
     g.setFont("6x8", ROW_FONT_SCALE);
     g.setFontAlign(0, 0);
-    g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
-    g.drawString(formatBpmLine("10m", avg10), w / 2, AVG_10MIN_Y);
+    g.drawString(formatBpmLine("1m", avg1), w / 2, y1);
+    g.drawString(formatBpmLine("10m", avg10), w / 2, y10);
     g.setFontAlign(-1, -1);
 }
 function redrawLiveReadings() {
-    drawInstantReading();
-    drawRollingAverages();
+    var yOffset = currentActivity !== undefined ? ACTIVE_SCREEN_ROW_Y_OFFSET : 0;
+    drawInstantReading(yOffset);
+    drawRollingAverages(yOffset);
 }
 function startLiveReadingsRedraw() {
     redrawIntervalId = setInterval(redrawLiveReadings, 1000);
@@ -204,12 +217,12 @@ function drawHomeScreen() {
     g.clear();
     drawInstantReading();
     drawRollingAverages();
-    g.setColor(g.theme.fg);
+    g.setColor(COLOR_GREEN);
     g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
-    g.setColor(g.theme.bg);
+    g.setColor(COLOR_BLACK);
     g.setFont("6x8", 2);
     g.setFontAlign(0, 0);
-    g.drawString("Pick activity", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
+    g.drawString("Start", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
     g.setColor(g.theme.fg);
     g.setFontAlign(-1, -1);
     g.setFont("6x8", 1);
@@ -223,28 +236,49 @@ function showHomeScreen() {
     drawHomeScreen();
     Bangle.setUI({ mode: "custom", touch: onHomeScreenTouch });
 }
+var PICKER_VISIBLE_ROWS = 4;
+var pickerScrollOffset = 0;
 function drawActivityPicker() {
     var w = g.getWidth();
     var h = g.getHeight();
-    var rowH = h / ACTIVITIES.length;
+    var rowH = h / PICKER_VISIBLE_ROWS;
     g.clear();
     g.setColor(g.theme.fg);
     g.setFont("6x8", 2);
     g.setFontAlign(0, 0);
     ACTIVITIES.forEach(function (activity, i) {
+        var y = i * rowH - pickerScrollOffset;
+        if (y + rowH < 0 || y > h)
+            return;
         if (i > 0)
-            g.drawLine(0, rowH * i, w, rowH * i);
-        g.drawString(activity, w / 2, rowH * i + rowH / 2);
+            g.drawLine(0, y, w, y);
+        g.drawString(activity, w / 2, y + rowH / 2);
     });
+    var contentH = ACTIVITIES.length * rowH;
+    var maxScroll = Math.max(0, contentH - h);
+    if (maxScroll > 0) {
+        var thumbH = Math.max(16, (h / contentH) * h);
+        var thumbY = (pickerScrollOffset / maxScroll) * (h - thumbH);
+        g.setColor(g.theme.fg);
+        g.fillRect(w - 4, thumbY, w - 1, thumbY + thumbH);
+    }
     g.setFontAlign(-1, -1);
 }
 function onActivityPickerTouch(_button, xy) {
     if (!xy)
         return;
-    var rowH = g.getHeight() / ACTIVITIES.length;
-    var activity = ACTIVITIES[Math.floor(xy.y / rowH)];
+    var rowH = g.getHeight() / PICKER_VISIBLE_ROWS;
+    var activity = ACTIVITIES[Math.floor((xy.y + pickerScrollOffset) / rowH)];
     if (activity !== undefined)
         onActivitySelected(activity);
+}
+function onActivityPickerDrag(event) {
+    var h = g.getHeight();
+    var rowH = h / PICKER_VISIBLE_ROWS;
+    var contentH = ACTIVITIES.length * rowH;
+    var maxScroll = Math.max(0, contentH - h);
+    pickerScrollOffset = Math.min(maxScroll, Math.max(0, pickerScrollOffset - event.dy));
+    drawActivityPicker();
 }
 function onActivityPickerSwipe(directionLR) {
     if (directionLR === 0)
@@ -254,24 +288,37 @@ function onActivityPickerSwipe(directionLR) {
 }
 function showActivityPicker() {
     stopLiveReadingsRedraw();
+    pickerScrollOffset = 0;
     drawActivityPicker();
-    Bangle.setUI({ mode: "custom", touch: onActivityPickerTouch, swipe: onActivityPickerSwipe });
+    Bangle.setUI({
+        mode: "custom",
+        touch: onActivityPickerTouch,
+        swipe: onActivityPickerSwipe,
+        drag: onActivityPickerDrag,
+    });
+}
+function drawActivityHeader(activity) {
+    var w = g.getWidth();
+    g.setColor(COLOR_WHITE);
+    g.fillRect(0, 0, w - 1, ACTIVITY_BAND_HEIGHT - 1);
+    g.setColor(COLOR_BLACK);
+    g.setFont("6x8", 2);
+    g.setFontAlign(0, -1);
+    g.drawString(activity, w / 2, ACTIVITY_Y);
 }
 function drawActiveSessionScreen(activity) {
     var w = g.getWidth();
     var h = g.getHeight();
     g.clear();
-    g.setFont("6x8", 2);
-    g.setFontAlign(0, -1);
-    g.drawString(activity, w / 2, ACTIVITY_Y);
-    drawInstantReading();
-    drawRollingAverages();
-    g.setColor(g.theme.fg);
+    drawActivityHeader(activity);
+    drawInstantReading(ACTIVE_SCREEN_ROW_Y_OFFSET);
+    drawRollingAverages(ACTIVE_SCREEN_ROW_Y_OFFSET);
+    g.setColor(COLOR_RED);
     g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
-    g.setColor(g.theme.bg);
+    g.setColor(COLOR_WHITE);
     g.setFont("6x8", 2);
     g.setFontAlign(0, 0);
-    g.drawString("Stop session", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
+    g.drawString("Stop", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
     g.setColor(g.theme.fg);
     g.setFontAlign(-1, -1);
     g.setFont("6x8", 1);
@@ -279,6 +326,31 @@ function drawActiveSessionScreen(activity) {
 function showActiveSessionScreen(activity) {
     drawActiveSessionScreen(activity);
     Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
+}
+function drawTrackedConfirmationScreen(activity) {
+    var w = g.getWidth();
+    g.clear();
+    drawActivityHeader(activity);
+    var cx = w / 2, cy = 90;
+    g.setColor(COLOR_GREEN);
+    g.fillPoly([
+        cx - 30, cy - 4, cx - 10, cy + 20, cx + 34, cy - 28,
+        cx + 26, cy - 36, cx - 10, cy, cx - 22, cy - 12,
+    ]);
+    g.setColor(g.theme.fg);
+    g.setFont("6x8", 2);
+    g.setFontAlign(0, 0);
+    g.drawString("Tracked!", w / 2, 140);
+    g.setFontAlign(-1, -1);
+}
+function showTrackedConfirmationScreen(activity) {
+    stopLiveReadingsRedraw();
+    drawTrackedConfirmationScreen(activity);
+    Bangle.setUI({ mode: "custom" });
+    setTimeout(function () {
+        startLiveReadingsRedraw();
+        showHomeScreen();
+    }, TRACKED_CONFIRMATION_DISMISS_MS);
 }
 function onActivitySelected(activity) {
     if (currentActivity !== undefined) {
@@ -297,9 +369,10 @@ function onSessionScreenTouch(_button, xy) {
     }
 }
 function stopSession() {
+    var stoppedActivity = currentActivity;
     currentActivity = undefined;
     stopPersistence();
-    showHomeScreen();
+    showTrackedConfirmationScreen(stoppedActivity);
 }
 Bangle.on("HRM", onHrmSample);
 startLiveMonitoring();

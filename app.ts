@@ -40,9 +40,9 @@
 
 // ===== State =====
 
-type Activity = "Jogging" | "Biking" | "Sleeping" | "Eating";
+type Activity = "Jogging" | "Biking" | "Sleeping" | "Eating" | "Walking" | "Swimming";
 
-const ACTIVITIES: Activity[] = ["Jogging", "Biking", "Sleeping", "Eating"];
+const ACTIVITIES: Activity[] = ["Jogging", "Biking", "Sleeping", "Eating", "Walking", "Swimming"];
 
 // Single source of truth for the running Session's activity, set once when
 // a Session starts.
@@ -335,6 +335,9 @@ function stopPersistence(): void {
 // ===== UI =====
 
 const BUTTON_ZONE_HEIGHT = 40;
+// How long the tracked-confirmation screen stays up before auto-returning
+// to the idle screen.
+const TRACKED_CONFIRMATION_DISMISS_MS = 2500;
 
 // Layout constants for the active-session screen's three stacked bpm rows
 // plus the activity name above them. First draft (Y-positions and font
@@ -346,14 +349,37 @@ const BUTTON_ZONE_HEIGHT = 40;
 // bpm rows are enlarged (scale 2) now that removing the label frees up
 // vertical space.
 const ACTIVITY_Y = 4;
+// Height of the white band drawn behind the activity name (black text) -
+// covers the scale-2 "6x8" glyph height (16px) plus top/bottom padding.
+const ACTIVITY_BAND_HEIGHT = 24;
 const NOW_Y = 44;
 const AVG_1MIN_Y = 72;
 const AVG_10MIN_Y = 100;
+// Shifts the three bpm rows down on the active-session screen only, so the
+// gap above them (below the white activity band) matches the gap below
+// them (above the Stop-session button) - the home screen has no activity
+// band, so its rows use no offset and keep the values above as-is.
+// Derived for the 176px Bangle.js 2 screen: the row block spans
+// NOW_Y-ROW_CLEAR_MARGIN..AVG_10MIN_Y+ROW_CLEAR_MARGIN (76px) inside the
+// region between ACTIVITY_BAND_HEIGHT and h-BUTTON_ZONE_HEIGHT (112px);
+// splitting the 36px slack evenly gives an 18px gap on each side, which is
+// +8px more than the un-offset top gap of 10px (NOW_Y-ROW_CLEAR_MARGIN
+// minus ACTIVITY_BAND_HEIGHT) - hence the +8 offset applied below.
+const ACTIVE_SCREEN_ROW_Y_OFFSET = 8;
 // Half-height of each bpm row's clear-band (fillRect Y ± this), and the
 // font scale they're drawn at - shared by drawInstantReading and
 // drawRollingAverages so the three rows stay visually identical.
 const ROW_CLEAR_MARGIN = 10;
 const ROW_FONT_SCALE = 2;
+
+// Shared button colors - "go" green for the Pick-activity button, "stop"
+// red for the Stop-session button, white text on both so it's readable
+// regardless of the light/dark theme underneath. Also reused by the
+// activity-name band (black text on white).
+const COLOR_GREEN = "#00a000";
+const COLOR_RED = "#c00000";
+const COLOR_WHITE = "#ffffff";
+const COLOR_BLACK = "#000000";
 
 // Shared formatter for a labeled bpm row ("Now"/"1m"/"10m"), used by both
 // drawInstantReading and drawRollingAverages so all three rows render
@@ -376,41 +402,49 @@ let redrawIntervalId: IntervalId | undefined;
 // activity name and Stop zone never flicker on every tick. Reads the latest
 // captured sample straight from Sampling; before the first real sample
 // lands this shows a placeholder, never a fabricated number.
-function drawInstantReading(): void {
+function drawInstantReading(yOffset: number = 0): void {
   const w = g.getWidth();
+  const y = NOW_Y + yOffset;
   const latest = getLatestHrSample();
   const bpm = latest === undefined ? undefined : Math.round(latest.bpm);
   g.setColor(g.theme.bg);
-  g.fillRect(0, NOW_Y - ROW_CLEAR_MARGIN, w, NOW_Y + ROW_CLEAR_MARGIN);
+  g.fillRect(0, y - ROW_CLEAR_MARGIN, w, y + ROW_CLEAR_MARGIN);
   g.setColor(g.theme.fg);
   g.setFont("6x8", ROW_FONT_SCALE);
   g.setFontAlign(0, 0);
-  g.drawString(formatBpmLine("Now", bpm), w / 2, NOW_Y);
+  g.drawString(formatBpmLine("Now", bpm), w / 2, y);
   g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
 }
 
 // Same clear-band-then-draw pattern as drawInstantReading, for the 1-min/
 // 10-min rows. Both are a plain arithmetic mean of hrRingBuffer samples
 // within their window (computeRollingAverage) - no smoothing, no weighting.
-function drawRollingAverages(): void {
+function drawRollingAverages(yOffset: number = 0): void {
   const w = g.getWidth();
   const avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
   const avg10 = computeRollingAverage(HR_AVG_10MIN_WINDOW_MS);
+  const y1 = AVG_1MIN_Y + yOffset;
+  const y10 = AVG_10MIN_Y + yOffset;
   g.setColor(g.theme.bg);
-  g.fillRect(0, AVG_1MIN_Y - ROW_CLEAR_MARGIN, w, AVG_1MIN_Y + ROW_CLEAR_MARGIN);
-  g.fillRect(0, AVG_10MIN_Y - ROW_CLEAR_MARGIN, w, AVG_10MIN_Y + ROW_CLEAR_MARGIN);
+  g.fillRect(0, y1 - ROW_CLEAR_MARGIN, w, y1 + ROW_CLEAR_MARGIN);
+  g.fillRect(0, y10 - ROW_CLEAR_MARGIN, w, y10 + ROW_CLEAR_MARGIN);
   g.setColor(g.theme.fg);
   g.setFont("6x8", ROW_FONT_SCALE);
   g.setFontAlign(0, 0);
-  g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
-  g.drawString(formatBpmLine("10m", avg10), w / 2, AVG_10MIN_Y);
+  g.drawString(formatBpmLine("1m", avg1), w / 2, y1);
+  g.drawString(formatBpmLine("10m", avg10), w / 2, y10);
   g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
 }
 
-// Redraw-timer callback: repaints all three live bpm rows every tick.
+// Redraw-timer callback: repaints all three live bpm rows every tick, at
+// the active-session screen's offset whenever a Session is running (the
+// only currentActivity !== undefined signal already available), or at the
+// home screen's un-offset position otherwise - the same shared timer
+// serves whichever screen is actually showing.
 function redrawLiveReadings(): void {
-  drawInstantReading();
-  drawRollingAverages();
+  const yOffset = currentActivity !== undefined ? ACTIVE_SCREEN_ROW_Y_OFFSET : 0;
+  drawInstantReading(yOffset);
+  drawRollingAverages(yOffset);
 }
 
 function startLiveReadingsRedraw(): void {
@@ -433,14 +467,18 @@ function drawHomeScreen(): void {
   drawInstantReading();
   drawRollingAverages();
 
-  // Bottom button: same theme-inverted fill/text treatment as the
-  // active-session screen's Stop-session button.
-  g.setColor(g.theme.fg);
+  // Bottom button: strong green "go" fill, matching the active-session
+  // screen's red Stop button. Black text (not white like Stop's) - white on
+  // this particular green didn't have enough contrast, per on-device
+  // feedback. "6x8" scale 2, same as Stop's (the only font/scale combo
+  // proven to actually exist on this device, after two smaller-scale
+  // attempts failed on-device).
+  g.setColor(COLOR_GREEN);
   g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
-  g.setColor(g.theme.bg);
+  g.setColor(COLOR_BLACK);
   g.setFont("6x8", 2);
   g.setFontAlign(0, 0);
-  g.drawString("Pick activity", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
+  g.drawString("Start", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
 
   g.setColor(g.theme.fg);
   g.setFontAlign(-1, -1);
@@ -463,28 +501,62 @@ function showHomeScreen(): void {
 // always draws its own top bar (hamburger/back icon), which is baked into
 // the widget itself and isn't suppressable via any Menu/MenuOptions field.
 // Hand-drawing it, like the other two screens, is the only way to get a
-// header-free picker. Four equal-height rows, one per activity, divided by
-// a thin line; no title, matching the home/active-session screens.
+// header-free picker. Fixed-height rows (screen height / PICKER_VISIBLE_ROWS,
+// the row size from when there were exactly 4 activities) rather than
+// dividing evenly by ACTIVITIES.length, so extra activities scroll instead
+// of every row shrinking - dragged via onActivityPickerDrag below.
+const PICKER_VISIBLE_ROWS = 4;
+
+// Vertical scroll position in px, 0 = top of the list. Reset to 0 each time
+// the picker opens (showActivityPicker) so it never reopens mid-scroll from
+// a previous visit.
+let pickerScrollOffset = 0;
+
 function drawActivityPicker(): void {
   const w = g.getWidth();
   const h = g.getHeight();
-  const rowH = h / ACTIVITIES.length;
+  const rowH = h / PICKER_VISIBLE_ROWS;
   g.clear();
   g.setColor(g.theme.fg);
   g.setFont("6x8", 2);
   g.setFontAlign(0, 0);
   ACTIVITIES.forEach((activity, i) => {
-    if (i > 0) g.drawLine(0, rowH * i, w, rowH * i);
-    g.drawString(activity, w / 2, rowH * i + rowH / 2);
+    const y = i * rowH - pickerScrollOffset;
+    if (y + rowH < 0 || y > h) return; // fully outside the viewport - skip
+    if (i > 0) g.drawLine(0, y, w, y);
+    g.drawString(activity, w / 2, y + rowH / 2);
   });
+  // Scroll indicator: a thin bar on the right edge, sized/positioned by how
+  // much of the full list is currently visible. Only drawn when there's
+  // more content than fits on screen, so it's absent for a short list.
+  const contentH = ACTIVITIES.length * rowH;
+  const maxScroll = Math.max(0, contentH - h);
+  if (maxScroll > 0) {
+    const thumbH = Math.max(16, (h / contentH) * h);
+    const thumbY = (pickerScrollOffset / maxScroll) * (h - thumbH);
+    g.setColor(g.theme.fg);
+    g.fillRect(w - 4, thumbY, w - 1, thumbY + thumbH);
+  }
   g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
 }
 
 function onActivityPickerTouch(_button?: number, xy?: TouchCallbackXY): void {
   if (!xy) return;
-  const rowH = g.getHeight() / ACTIVITIES.length;
-  const activity = ACTIVITIES[Math.floor(xy.y / rowH)];
+  const rowH = g.getHeight() / PICKER_VISIBLE_ROWS;
+  const activity = ACTIVITIES[Math.floor((xy.y + pickerScrollOffset) / rowH)];
   if (activity !== undefined) onActivitySelected(activity);
+}
+
+// Drags the list with the finger (drag up reveals rows below, the standard
+// mobile-scroll convention), clamped so it can never scroll past the first
+// or last row.
+function onActivityPickerDrag(event: { x: number; y: number; dx: number; dy: number; b: 1 | 0 }): void {
+  const h = g.getHeight();
+  const rowH = h / PICKER_VISIBLE_ROWS;
+  const contentH = ACTIVITIES.length * rowH;
+  const maxScroll = Math.max(0, contentH - h);
+  pickerScrollOffset = Math.min(maxScroll, Math.max(0, pickerScrollOffset - event.dy));
+  drawActivityPicker();
 }
 
 // Any horizontal swipe (either direction) goes back to the idle/home
@@ -500,8 +572,33 @@ function onActivityPickerSwipe(directionLR: number): void {
 
 function showActivityPicker(): void {
   stopLiveReadingsRedraw(); // avoid our redraw ticks drawing under the picker
+  pickerScrollOffset = 0;
   drawActivityPicker();
-  Bangle.setUI({ mode: "custom", touch: onActivityPickerTouch, swipe: onActivityPickerSwipe });
+  Bangle.setUI({
+    mode: "custom",
+    touch: onActivityPickerTouch,
+    swipe: onActivityPickerSwipe,
+    drag: onActivityPickerDrag,
+  });
+}
+
+// Black-on-white activity-name header, shared verbatim by the
+// active-session screen and the tracked-confirmation screen so the two can
+// never visually drift apart (per this feature's own "Always"). Top-aligned
+// at the very top of the screen - the "Current session:" label that used to
+// occupy this spot is gone (the Stop-session button already makes the
+// active-session screen's purpose obvious), so the activity name anchors at
+// the label's old y=4 position instead of sharing the screen with it. Black
+// text on a white band, a fixed-look header regardless of the light/dark
+// theme.
+function drawActivityHeader(activity: Activity): void {
+  const w = g.getWidth();
+  g.setColor(COLOR_WHITE);
+  g.fillRect(0, 0, w - 1, ACTIVITY_BAND_HEIGHT - 1);
+  g.setColor(COLOR_BLACK);
+  g.setFont("6x8", 2);
+  g.setFontAlign(0, -1);
+  g.drawString(activity, w / 2, ACTIVITY_Y);
 }
 
 // Hand-drawn (no E.showMessage) so no title-bar chrome is ever rendered via
@@ -514,32 +611,25 @@ function drawActiveSessionScreen(activity: Activity): void {
   const h = g.getHeight();
   g.clear(); // resets fg/bg to g.theme.fg/g.theme.bg
 
-  // Activity name, top-aligned at the very top of the screen - the
-  // "Current session:" label that used to occupy this spot is gone (the
-  // Stop-session button already makes the screen's purpose obvious), so the
-  // activity name now anchors at the label's old y=4 position instead of
-  // sharing the screen with it.
-  g.setFont("6x8", 2);
-  g.setFontAlign(0, -1);
-  g.drawString(activity, w / 2, ACTIVITY_Y);
+  drawActivityHeader(activity);
 
   // Instant HR reading plus 1-min/10-min rolling averages, stacked below the
   // activity name -- drawn once here so all three placeholders are visible
   // immediately, not just after the first redraw tick; the redraw timer
   // (started in showActiveSessionScreen) keeps them current afterwards.
-  drawInstantReading();
-  drawRollingAverages();
+  drawInstantReading(ACTIVE_SCREEN_ROW_Y_OFFSET);
+  drawRollingAverages(ACTIVE_SCREEN_ROW_Y_OFFSET);
 
-  // Stop zone: theme-inverted fill with theme-background-colored text, so
-  // it stays legible in both light and dark themes. Font/align set
-  // explicitly (not inherited from whatever drew before) since
-  // drawInstantReading() also touches both.
-  g.setColor(g.theme.fg);
+  // Stop zone: strong red fill (matching the home screen's green Start
+  // button) with white text, so it stays legible in both light and dark
+  // themes. Font/align set explicitly (not inherited from whatever drew
+  // before) since drawInstantReading() also touches both.
+  g.setColor(COLOR_RED);
   g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
-  g.setColor(g.theme.bg);
+  g.setColor(COLOR_WHITE);
   g.setFont("6x8", 2);
   g.setFontAlign(0, 0);
-  g.drawString("Stop session", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
+  g.drawString("Stop", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
 
   g.setColor(g.theme.fg);
   g.setFontAlign(-1, -1);
@@ -552,6 +642,49 @@ function showActiveSessionScreen(activity: Activity): void {
   // No startLiveReadingsRedraw() call here - the redraw timer is already
   // app-lifetime, started once at launch (and resumed in onActivitySelected
   // after the picker paused it).
+}
+
+// Confirmation screen shown between "Stop" and the idle screen -
+// acknowledges the just-stopped Session was actually saved. Reuses
+// drawActivityHeader() verbatim (same header as the active-session screen -
+// the two can never visually drift apart) plus a hand-drawn checkmark
+// (g.fillPoly - a plain filled polygon, always part of Graphics, no icon
+// font or asset dependency) and "Tracked!" text. First-draft checkmark
+// geometry, adapted from the fillPoly doc example's own checkmark-shaped
+// sample - expect on-device coordinate iteration like every other
+// screen-layout choice in this file.
+function drawTrackedConfirmationScreen(activity: Activity): void {
+  const w = g.getWidth();
+  g.clear();
+  drawActivityHeader(activity);
+  const cx = w / 2, cy = 90;
+  g.setColor(COLOR_GREEN);
+  g.fillPoly([
+    cx - 30, cy - 4, cx - 10, cy + 20, cx + 34, cy - 28,
+    cx + 26, cy - 36, cx - 10, cy, cx - 22, cy - 12,
+  ]);
+  g.setColor(g.theme.fg);
+  g.setFont("6x8", 2);
+  g.setFontAlign(0, 0);
+  g.drawString("Tracked!", w / 2, 140);
+  g.setFontAlign(-1, -1);
+}
+
+// Pauses the shared live-readings redraw timer before showing this screen
+// (same pause/resume pattern showActivityPicker/onActivitySelected already
+// use for the same reason) so its ~1Hz ticks can never draw bpm rows over
+// this screen, then resumes it right before showHomeScreen() once the fixed
+// ~2.5s auto-dismiss timer elapses. No touch handler is registered
+// (Bangle.setUI({mode:"custom"}) with no touch/swipe) - dismissal is
+// auto-only, a tap during the ~2.5s window is a no-op.
+function showTrackedConfirmationScreen(activity: Activity): void {
+  stopLiveReadingsRedraw();
+  drawTrackedConfirmationScreen(activity);
+  Bangle.setUI({ mode: "custom" });
+  setTimeout(() => {
+    startLiveReadingsRedraw();
+    showHomeScreen();
+  }, TRACKED_CONFIRMATION_DISMISS_MS);
 }
 
 // ===== Top-level wiring =====
@@ -578,18 +711,23 @@ function onSessionScreenTouch(_button?: number, xy?: TouchCallbackXY): void {
   }
 }
 
-// Resets in-memory Session state and returns to the idle/home screen.
-// stopPersistence() finalizes the Session File (flush timer cleared, final
-// flush, file reference dropped) before any in-memory state here is
-// cleared. Live monitoring (HRM/capture timer/redraw timer) is never
-// stopped here - it keeps running app-lifetime, so the bpm rows never
-// blank out during this transition. showHomeScreen()'s own Bangle.setUI()
-// call replaces the previous UI registration atomically, so there's no
-// separate Bangle.setUI() call here to clear it first.
+// Resets in-memory Session state and shows the tracked-confirmation screen
+// (which auto-returns to the idle/home screen on its own ~2.5s timer).
+// currentActivity is captured into stoppedActivity before it's cleared, so
+// the confirmation screen shows the just-stopped Session's activity name,
+// not a cleared/undefined one - stopSession is reached only via the Stop
+// button, which is only shown while a Session is active, so currentActivity
+// is always set here. stopPersistence() finalizes the Session File (flush
+// timer cleared, final flush, file reference dropped) before any in-memory
+// state here is cleared. Live monitoring (HRM/capture timer) is never
+// stopped here - it keeps running app-lifetime, so the bpm rows never blank
+// out during this transition; only the redraw timer is paused, by
+// showTrackedConfirmationScreen itself.
 function stopSession(): void {
+  const stoppedActivity = currentActivity!;
   currentActivity = undefined;
   stopPersistence();
-  showHomeScreen();
+  showTrackedConfirmationScreen(stoppedActivity);
 }
 
 // Registered once at module load, not per-session - it's cheap and inert
