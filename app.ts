@@ -24,7 +24,19 @@
 // dropped), so nothing captured is ever left unwritten when a Session ends.
 // A follow-up spec adds size-triggered rotation: flushSamples() opens a new
 // file under the same Session (same header, next track letter) before a
-// batch would push the current file past ~130KB.
+// batch would push the current file past ~130KB. A later spec (continuous
+// live monitoring + idle/home screen) splits Sampling's startSampling/
+// stopSampling into two independently-lifecycled halves:
+// startLiveMonitoring/stopLiveMonitoring (HRM power, capture timer, ring
+// buffer -- now app-lifetime, started once at launch) and
+// startPersistence/stopPersistence (Session File, write queue, flush timer
+// -- still strictly Session-scoped). The boot-time native Activity menu is
+// replaced by a custom-drawn idle/home screen (drawHomeScreen/
+// showHomeScreen) showing the same live bpm rows whenever no Session is
+// active, with a bottom button opening an Activity picker (showActivityPicker,
+// renamed from showActivityMenu). Originally the native E.showMenu, later
+// hand-drawn instead once its always-on title bar turned out to not be
+// suppressable via any menu option.
 
 // ===== State =====
 
@@ -71,15 +83,15 @@ function openSessionFile(activity: Activity, startedEpochMs: number): StorageFil
 type HrSample = { t: number; bpm: number };
 
 const HR_SAMPLE_INTERVAL_MS = 1000;
-// Also relied on verbatim by HR_AVG_5MIN_WINDOW_MS below (Story 1.6's "5m"
+// Also relied on verbatim by HR_AVG_10MIN_WINDOW_MS below (the "10m"
 // label) - changing this for retention/memory reasons would silently change
-// what "5m" means on screen too.
-const HR_BUFFER_WINDOW_MS = 300000; // 300s
-// Story 1.6's two rolling-average windows. The 5-min window reuses the ring
-// buffer's own eviction window verbatim (both are 300s) rather than defining
+// what "10m" means on screen too.
+const HR_BUFFER_WINDOW_MS = 600000; // 600s
+// The two rolling-average windows. The 10-min window reuses the ring
+// buffer's own eviction window verbatim (both are 600s) rather than defining
 // a second, independent constant that could drift out of sync with it.
 const HR_AVG_1MIN_WINDOW_MS = 60000;
-const HR_AVG_5MIN_WINDOW_MS = HR_BUFFER_WINDOW_MS;
+const HR_AVG_10MIN_WINDOW_MS = HR_BUFFER_WINDOW_MS;
 // 10s: batches writes without holding too much unflushed data at once. Not
 // a safety-critical number - no crash-recovery is attempted for a Session
 // interrupted by reset/power loss (accepted epic behavior), so this just
@@ -90,7 +102,7 @@ const HR_FLUSH_INTERVAL_MS = 10000;
 const HR_ROTATION_THRESHOLD_BYTES = 125000;
 
 // Time-windowed ring buffer of captured samples, the sole source for the
-// live instant reading (and, in Story 1.6, the 1-min/5-min rolling
+// live instant reading (and, in Story 1.6, the 1-min/10-min rolling
 // averages). Evicts by timestamp, not by a fixed slot count.
 let hrRingBuffer: HrSample[] = [];
 
@@ -151,7 +163,11 @@ function captureSample(): void {
   const now = Math.round(Date.now());
   const sample: HrSample = { t: now, bpm: latestBpm };
   hrRingBuffer.push(sample);
-  hrWriteQueue.push(sample);
+  // Only queued for persistence when a Session is actually active
+  // (currentFile !== undefined) - live monitoring (the ring buffer push
+  // above) now runs for the app's whole lifetime, but persistence stays
+  // exactly as narrow in scope as before.
+  if (currentFile !== undefined) hrWriteQueue.push(sample);
   const cutoff = now - HR_BUFFER_WINDOW_MS;
   while (hrRingBuffer.length > 0) {
     const oldest = hrRingBuffer[0];
@@ -238,33 +254,44 @@ function flushSamples(): void {
   hrWriteQueue = [];
 }
 
-// Opens the Session File, powers on the HRM sensor, and starts both the
-// ~1s capture timer and the periodic flush timer. Resets the ring buffer
-// and write queue so a new Session never sees stale samples from a
-// previous one. Sole call site of Storage.open() (via openSessionFile) -
-// Sampling owns the file handle for the Session's whole lifetime.
-function startSampling(activity: Activity, startedEpochMs: number): void {
-  hrRingBuffer = [];
-  hrWriteQueue = [];
+// Powers on the HRM sensor and starts the ~1s capture timer. Runs for the
+// app's whole lifetime - started once at launch, not per-Session - so live
+// bpm data (ring buffer) is available on the idle/home screen even when no
+// Session is active. Persistence (Session File, write queue, flush timer)
+// is entirely separate - see startPersistence/stopPersistence below.
+function startLiveMonitoring(): void {
+  Bangle.setHRMPower(true, "hrsessions");
+  sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
+}
+
+// Counterpart to startLiveMonitoring() - not currently called anywhere
+// (the app never stops live monitoring while running; see the spec's
+// deferred-work.md for the explicit app-close cleanup follow-up), kept for
+// symmetry and any future caller.
+function stopLiveMonitoring(): void {
+  Bangle.setHRMPower(false, "hrsessions");
+  if (sampleIntervalId !== undefined) clearInterval(sampleIntervalId);
+  sampleIntervalId = undefined;
   latestBpm = undefined;
+  hrRingBuffer = [];
+}
+
+// Opens the Session File and starts the periodic flush timer. Resets the
+// write queue so a new Session never sees stale samples from a previous
+// one. Sole call site of Storage.open() (via openSessionFile) - Sampling
+// owns the file handle for the Session's whole lifetime. Session-lifetime
+// only - never touches the HRM sensor or the capture timer, both of which
+// are already running continuously via startLiveMonitoring().
+function startPersistence(activity: Activity, startedEpochMs: number): void {
+  hrWriteQueue = [];
   sessionActivity = activity;
   sessionStartedEpochMs = startedEpochMs;
   currentFile = openSessionFile(activity, startedEpochMs);
   currentFileSize = currentFile.getLength();
   sessionFileNames = [(currentFile as any).name];
-  Bangle.setHRMPower(true, "hrsessions");
-  sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
   flushIntervalId = setInterval(flushSamples, HR_FLUSH_INTERVAL_MS);
 }
 
-// The epic's exact 4-step stop sequence: (1) HRM powered off first, so no
-// more raw events can update latestBpm after this point and the last
-// written row's timestamp is the true session end time - there is no
-// removeListener typing on Bangle in the vendored types (same gap noted in
-// Story 1.4), so powering off achieves the same "unsubscribe" goal; (2)
-// both timers cleared; (3) one final flushSamples() call to catch
-// anything queued since the last periodic flush; (4) the file reference
-// dropped (there is no .close() - "closing" means "stop writing to it").
 // Debug aid: dumps every file from the just-finalized Session (the first
 // file plus any rotations - see sessionFileNames) to the console, so a
 // single console copy after Stop shows everything needed to confirm a
@@ -285,21 +312,19 @@ function logSessionFile(): void {
   }
 }
 
-function stopSampling(): void {
-  Bangle.setHRMPower(false, "hrsessions"); // (1)
-  if (sampleIntervalId !== undefined) clearInterval(sampleIntervalId); // (2)
-  if (flushIntervalId !== undefined) clearInterval(flushIntervalId); // (2)
-  sampleIntervalId = undefined;
+// Session-lifetime counterpart to startPersistence() - never touches the
+// HRM sensor or the capture timer, both of which keep running via
+// startLiveMonitoring() regardless of Session state. Flush timer cleared,
+// one final flushSamples() call to catch anything queued since the last
+// periodic flush, then the file reference dropped (there is no .close() -
+// "closing" means "stop writing to it").
+function stopPersistence(): void {
+  if (flushIntervalId !== undefined) clearInterval(flushIntervalId);
   flushIntervalId = undefined;
-  flushSamples(); // (3)
+  flushSamples();
   logSessionFile();
-  currentFile = undefined; // (4)
-  latestBpm = undefined;
-  hrRingBuffer = []; // don't let a stale reading answer getLatestHrSample() between sessions
+  currentFile = undefined;
   hrWriteQueue = [];
-  // Don't let stale state (same reasoning as the ring buffer/write queue
-  // above) answer between Sessions or feed a rotation after this Session
-  // has ended.
   sessionActivity = undefined;
   sessionStartedEpochMs = undefined;
   currentFileSize = 0;
@@ -309,7 +334,7 @@ function stopSampling(): void {
 
 // ===== UI =====
 
-const STOP_ZONE_HEIGHT = 40;
+const BUTTON_ZONE_HEIGHT = 40;
 
 // Layout constants for the active-session screen's three stacked bpm rows
 // plus the activity name above them. First draft (Y-positions and font
@@ -323,14 +348,14 @@ const STOP_ZONE_HEIGHT = 40;
 const ACTIVITY_Y = 4;
 const NOW_Y = 44;
 const AVG_1MIN_Y = 72;
-const AVG_5MIN_Y = 100;
+const AVG_10MIN_Y = 100;
 // Half-height of each bpm row's clear-band (fillRect Y ± this), and the
 // font scale they're drawn at - shared by drawInstantReading and
 // drawRollingAverages so the three rows stay visually identical.
 const ROW_CLEAR_MARGIN = 10;
 const ROW_FONT_SCALE = 2;
 
-// Shared formatter for a labeled bpm row ("Now"/"1m"/"5m"), used by both
+// Shared formatter for a labeled bpm row ("Now"/"1m"/"10m"), used by both
 // drawInstantReading and drawRollingAverages so all three rows render
 // identically. Placeholder ("-- bpm"), never a fabricated number, until a
 // real value is available.
@@ -339,12 +364,12 @@ function formatBpmLine(label: string, value: number | undefined): string {
   return label + ": " + Math.round(value) + " bpm";
 }
 
-// Redraw timer covering all three live bpm rows (instant, 1-min, 5-min),
+// Redraw timer covering all three live bpm rows (instant, 1-min, 10-min),
 // independent of both the HRM event handler and Sampling's own ~1s capture
-// timer -- started alongside the active-session screen and stopped in
-// stopSession, mirroring the Sampling timers' lifecycle exactly (started
-// together, stopped together). One shared ~1Hz timer per the epic's stated
-// UI design, not three.
+// timer -- app-lifetime like live monitoring itself (started once at
+// launch), paused only around the Activity picker (showActivityPicker/
+// onActivitySelected) so our own ticks can't draw underneath it. One shared
+// ~1Hz timer per the epic's stated UI design, not three.
 let redrawIntervalId: IntervalId | undefined;
 
 // Repaints only its own small text band (never the whole screen) so the
@@ -365,20 +390,20 @@ function drawInstantReading(): void {
 }
 
 // Same clear-band-then-draw pattern as drawInstantReading, for the 1-min/
-// 5-min rows. Both are a plain arithmetic mean of hrRingBuffer samples
+// 10-min rows. Both are a plain arithmetic mean of hrRingBuffer samples
 // within their window (computeRollingAverage) - no smoothing, no weighting.
 function drawRollingAverages(): void {
   const w = g.getWidth();
   const avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
-  const avg5 = computeRollingAverage(HR_AVG_5MIN_WINDOW_MS);
+  const avg10 = computeRollingAverage(HR_AVG_10MIN_WINDOW_MS);
   g.setColor(g.theme.bg);
   g.fillRect(0, AVG_1MIN_Y - ROW_CLEAR_MARGIN, w, AVG_1MIN_Y + ROW_CLEAR_MARGIN);
-  g.fillRect(0, AVG_5MIN_Y - ROW_CLEAR_MARGIN, w, AVG_5MIN_Y + ROW_CLEAR_MARGIN);
+  g.fillRect(0, AVG_10MIN_Y - ROW_CLEAR_MARGIN, w, AVG_10MIN_Y + ROW_CLEAR_MARGIN);
   g.setColor(g.theme.fg);
   g.setFont("6x8", ROW_FONT_SCALE);
   g.setFontAlign(0, 0);
   g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
-  g.drawString(formatBpmLine("5m", avg5), w / 2, AVG_5MIN_Y);
+  g.drawString(formatBpmLine("10m", avg10), w / 2, AVG_10MIN_Y);
   g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
 }
 
@@ -397,14 +422,86 @@ function stopLiveReadingsRedraw(): void {
   redrawIntervalId = undefined;
 }
 
-function showActivityMenu(): void {
-  const menu: Menu = {};
-  ACTIVITIES.forEach((activity) => {
-    menu[activity] = () => {
-      onActivitySelected(activity);
-    };
+// Idle/home screen: mirrors the active-session screen's structure (same
+// drawInstantReading()/drawRollingAverages() calls, same bottom button
+// zone) but with no activity name/header, since no Session is active.
+function drawHomeScreen(): void {
+  const w = g.getWidth();
+  const h = g.getHeight();
+  g.clear(); // resets fg/bg to g.theme.fg/g.theme.bg
+
+  drawInstantReading();
+  drawRollingAverages();
+
+  // Bottom button: same theme-inverted fill/text treatment as the
+  // active-session screen's Stop-session button.
+  g.setColor(g.theme.fg);
+  g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
+  g.setColor(g.theme.bg);
+  g.setFont("6x8", 2);
+  g.setFontAlign(0, 0);
+  g.drawString("Pick activity", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
+
+  g.setColor(g.theme.fg);
+  g.setFontAlign(-1, -1);
+  g.setFont("6x8", 1);
+}
+
+function onHomeScreenTouch(_button?: number, xy?: TouchCallbackXY): void {
+  if (xy && xy.y >= g.getHeight() - BUTTON_ZONE_HEIGHT) {
+    showActivityPicker();
+  }
+}
+
+function showHomeScreen(): void {
+  drawHomeScreen();
+  Bangle.setUI({ mode: "custom", touch: onHomeScreenTouch });
+}
+
+// Hand-drawn Activity picker (previously the native E.showMenu) - switched
+// off native menus entirely because Bangle.js 2's built-in menu widget
+// always draws its own top bar (hamburger/back icon), which is baked into
+// the widget itself and isn't suppressable via any Menu/MenuOptions field.
+// Hand-drawing it, like the other two screens, is the only way to get a
+// header-free picker. Four equal-height rows, one per activity, divided by
+// a thin line; no title, matching the home/active-session screens.
+function drawActivityPicker(): void {
+  const w = g.getWidth();
+  const h = g.getHeight();
+  const rowH = h / ACTIVITIES.length;
+  g.clear();
+  g.setColor(g.theme.fg);
+  g.setFont("6x8", 2);
+  g.setFontAlign(0, 0);
+  ACTIVITIES.forEach((activity, i) => {
+    if (i > 0) g.drawLine(0, rowH * i, w, rowH * i);
+    g.drawString(activity, w / 2, rowH * i + rowH / 2);
   });
-  E.showMenu(menu);
+  g.setFontAlign(-1, -1); // restore to a neutral default; don't assume what a caller draws next
+}
+
+function onActivityPickerTouch(_button?: number, xy?: TouchCallbackXY): void {
+  if (!xy) return;
+  const rowH = g.getHeight() / ACTIVITIES.length;
+  const activity = ACTIVITIES[Math.floor(xy.y / rowH)];
+  if (activity !== undefined) onActivitySelected(activity);
+}
+
+// Any horizontal swipe (either direction) goes back to the idle/home
+// screen - deliberately direction-agnostic. This is the only swipe handler
+// in the app, so there's no other gesture it could collide with, and it
+// sidesteps needing to pin down Bangle.js's directionLR sign convention
+// (a prior left-only version fired on the wrong physical gesture).
+function onActivityPickerSwipe(directionLR: number): void {
+  if (directionLR === 0) return; // vertical-only swipe, not a left/right one
+  startLiveReadingsRedraw();
+  showHomeScreen();
+}
+
+function showActivityPicker(): void {
+  stopLiveReadingsRedraw(); // avoid our redraw ticks drawing under the picker
+  drawActivityPicker();
+  Bangle.setUI({ mode: "custom", touch: onActivityPickerTouch, swipe: onActivityPickerSwipe });
 }
 
 // Hand-drawn (no E.showMessage) so no title-bar chrome is ever rendered via
@@ -426,7 +523,7 @@ function drawActiveSessionScreen(activity: Activity): void {
   g.setFontAlign(0, -1);
   g.drawString(activity, w / 2, ACTIVITY_Y);
 
-  // Instant HR reading plus 1-min/5-min rolling averages, stacked below the
+  // Instant HR reading plus 1-min/10-min rolling averages, stacked below the
   // activity name -- drawn once here so all three placeholders are visible
   // immediately, not just after the first redraw tick; the redraw timer
   // (started in showActiveSessionScreen) keeps them current afterwards.
@@ -438,11 +535,11 @@ function drawActiveSessionScreen(activity: Activity): void {
   // explicitly (not inherited from whatever drew before) since
   // drawInstantReading() also touches both.
   g.setColor(g.theme.fg);
-  g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
+  g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
   g.setColor(g.theme.bg);
   g.setFont("6x8", 2);
   g.setFontAlign(0, 0);
-  g.drawString("Stop session", w / 2, h - STOP_ZONE_HEIGHT / 2);
+  g.drawString("Stop session", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
 
   g.setColor(g.theme.fg);
   g.setFontAlign(-1, -1);
@@ -452,44 +549,47 @@ function drawActiveSessionScreen(activity: Activity): void {
 function showActiveSessionScreen(activity: Activity): void {
   drawActiveSessionScreen(activity);
   Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
-  startLiveReadingsRedraw();
+  // No startLiveReadingsRedraw() call here - the redraw timer is already
+  // app-lifetime, started once at launch (and resumed in onActivitySelected
+  // after the picker paused it).
 }
 
 // ===== Top-level wiring =====
 
-// startSampling() (which opens the Session File) runs before currentActivity
-// is set, not after - if it throws, currentActivity is never left stuck
-// set, so the Story 1.3 guard above doesn't permanently block every future
-// activity selection.
+// startPersistence() (which opens the Session File) runs before
+// currentActivity is set, not after - if it throws, currentActivity is
+// never left stuck set, so the Story 1.3 guard above doesn't permanently
+// block every future activity selection.
 function onActivitySelected(activity: Activity): void {
   if (currentActivity !== undefined) {
     console.log("hrsessions: ignored " + activity + " tap - already active: " + currentActivity);
     return;
   }
+  startLiveReadingsRedraw(); // resume, paused by showActivityPicker()
   const startedEpochMs = Math.round(Date.now());
-  startSampling(activity, startedEpochMs);
+  startPersistence(activity, startedEpochMs);
   currentActivity = activity;
-  E.showMenu(); // remove the Activity menu
   showActiveSessionScreen(activity);
 }
 
 function onSessionScreenTouch(_button?: number, xy?: TouchCallbackXY): void {
-  if (xy && xy.y >= g.getHeight() - STOP_ZONE_HEIGHT) {
+  if (xy && xy.y >= g.getHeight() - BUTTON_ZONE_HEIGHT) {
     stopSession();
   }
 }
 
-// Resets in-memory Session state and returns to the Activity menu.
-// stopSampling() runs the epic's 4-step stop sequence (HRM off, timers
-// cleared, final flush, file reference dropped) before any in-memory state
-// here is cleared. Clear the custom UI/touch handler before switching
-// screens so a stray touch can't retrigger this after the menu is shown.
+// Resets in-memory Session state and returns to the idle/home screen.
+// stopPersistence() finalizes the Session File (flush timer cleared, final
+// flush, file reference dropped) before any in-memory state here is
+// cleared. Live monitoring (HRM/capture timer/redraw timer) is never
+// stopped here - it keeps running app-lifetime, so the bpm rows never
+// blank out during this transition. showHomeScreen()'s own Bangle.setUI()
+// call replaces the previous UI registration atomically, so there's no
+// separate Bangle.setUI() call here to clear it first.
 function stopSession(): void {
   currentActivity = undefined;
-  stopSampling();
-  stopLiveReadingsRedraw();
-  Bangle.setUI();
-  showActivityMenu();
+  stopPersistence();
+  showHomeScreen();
 }
 
 // Registered once at module load, not per-session - it's cheap and inert
@@ -497,4 +597,11 @@ function stopSession(): void {
 // start/stop and no risk of listener accumulation across sessions.
 Bangle.on("HRM", onHrmSample);
 
-showActivityMenu();
+// Live monitoring (HRM power, capture timer) and the redraw timer both
+// start once here, at app launch, and run for the app's whole lifetime -
+// independent of whether a Session is active. The idle/home screen is
+// shown first; selecting an activity starts persistence on top of the
+// already-running live monitoring.
+startLiveMonitoring();
+startLiveReadingsRedraw();
+showHomeScreen();

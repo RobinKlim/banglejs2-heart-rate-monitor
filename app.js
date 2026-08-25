@@ -21,9 +21,9 @@ function openSessionFile(activity, startedEpochMs) {
     return file;
 }
 var HR_SAMPLE_INTERVAL_MS = 1000;
-var HR_BUFFER_WINDOW_MS = 300000;
+var HR_BUFFER_WINDOW_MS = 600000;
 var HR_AVG_1MIN_WINDOW_MS = 60000;
-var HR_AVG_5MIN_WINDOW_MS = HR_BUFFER_WINDOW_MS;
+var HR_AVG_10MIN_WINDOW_MS = HR_BUFFER_WINDOW_MS;
 var HR_FLUSH_INTERVAL_MS = 10000;
 var HR_ROTATION_THRESHOLD_BYTES = 125000;
 var hrRingBuffer = [];
@@ -45,7 +45,8 @@ function captureSample() {
     var now = Math.round(Date.now());
     var sample = { t: now, bpm: latestBpm };
     hrRingBuffer.push(sample);
-    hrWriteQueue.push(sample);
+    if (currentFile !== undefined)
+        hrWriteQueue.push(sample);
     var cutoff = now - HR_BUFFER_WINDOW_MS;
     while (hrRingBuffer.length > 0) {
         var oldest = hrRingBuffer[0];
@@ -97,17 +98,25 @@ function flushSamples() {
     console.log("hrsessions: flushed " + hrWriteQueue.length + " samples");
     hrWriteQueue = [];
 }
-function startSampling(activity, startedEpochMs) {
-    hrRingBuffer = [];
-    hrWriteQueue = [];
+function startLiveMonitoring() {
+    Bangle.setHRMPower(true, "hrsessions");
+    sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
+}
+function stopLiveMonitoring() {
+    Bangle.setHRMPower(false, "hrsessions");
+    if (sampleIntervalId !== undefined)
+        clearInterval(sampleIntervalId);
+    sampleIntervalId = undefined;
     latestBpm = undefined;
+    hrRingBuffer = [];
+}
+function startPersistence(activity, startedEpochMs) {
+    hrWriteQueue = [];
     sessionActivity = activity;
     sessionStartedEpochMs = startedEpochMs;
     currentFile = openSessionFile(activity, startedEpochMs);
     currentFileSize = currentFile.getLength();
     sessionFileNames = [currentFile.name];
-    Bangle.setHRMPower(true, "hrsessions");
-    sampleIntervalId = setInterval(captureSample, HR_SAMPLE_INTERVAL_MS);
     flushIntervalId = setInterval(flushSamples, HR_FLUSH_INTERVAL_MS);
 }
 function logSessionFile() {
@@ -124,19 +133,13 @@ function logSessionFile() {
         console.log("hrsessions: --- end " + name + " ---");
     }
 }
-function stopSampling() {
-    Bangle.setHRMPower(false, "hrsessions");
-    if (sampleIntervalId !== undefined)
-        clearInterval(sampleIntervalId);
+function stopPersistence() {
     if (flushIntervalId !== undefined)
         clearInterval(flushIntervalId);
-    sampleIntervalId = undefined;
     flushIntervalId = undefined;
     flushSamples();
     logSessionFile();
     currentFile = undefined;
-    latestBpm = undefined;
-    hrRingBuffer = [];
     hrWriteQueue = [];
     sessionActivity = undefined;
     sessionStartedEpochMs = undefined;
@@ -144,11 +147,11 @@ function stopSampling() {
     sessionFileNames = [];
     console.log("hrsessions: stopped");
 }
-var STOP_ZONE_HEIGHT = 40;
+var BUTTON_ZONE_HEIGHT = 40;
 var ACTIVITY_Y = 4;
 var NOW_Y = 44;
 var AVG_1MIN_Y = 72;
-var AVG_5MIN_Y = 100;
+var AVG_10MIN_Y = 100;
 var ROW_CLEAR_MARGIN = 10;
 var ROW_FONT_SCALE = 2;
 function formatBpmLine(label, value) {
@@ -172,15 +175,15 @@ function drawInstantReading() {
 function drawRollingAverages() {
     var w = g.getWidth();
     var avg1 = computeRollingAverage(HR_AVG_1MIN_WINDOW_MS);
-    var avg5 = computeRollingAverage(HR_AVG_5MIN_WINDOW_MS);
+    var avg10 = computeRollingAverage(HR_AVG_10MIN_WINDOW_MS);
     g.setColor(g.theme.bg);
     g.fillRect(0, AVG_1MIN_Y - ROW_CLEAR_MARGIN, w, AVG_1MIN_Y + ROW_CLEAR_MARGIN);
-    g.fillRect(0, AVG_5MIN_Y - ROW_CLEAR_MARGIN, w, AVG_5MIN_Y + ROW_CLEAR_MARGIN);
+    g.fillRect(0, AVG_10MIN_Y - ROW_CLEAR_MARGIN, w, AVG_10MIN_Y + ROW_CLEAR_MARGIN);
     g.setColor(g.theme.fg);
     g.setFont("6x8", ROW_FONT_SCALE);
     g.setFontAlign(0, 0);
     g.drawString(formatBpmLine("1m", avg1), w / 2, AVG_1MIN_Y);
-    g.drawString(formatBpmLine("5m", avg5), w / 2, AVG_5MIN_Y);
+    g.drawString(formatBpmLine("10m", avg10), w / 2, AVG_10MIN_Y);
     g.setFontAlign(-1, -1);
 }
 function redrawLiveReadings() {
@@ -195,14 +198,64 @@ function stopLiveReadingsRedraw() {
         clearInterval(redrawIntervalId);
     redrawIntervalId = undefined;
 }
-function showActivityMenu() {
-    var menu = {};
-    ACTIVITIES.forEach(function (activity) {
-        menu[activity] = function () {
-            onActivitySelected(activity);
-        };
+function drawHomeScreen() {
+    var w = g.getWidth();
+    var h = g.getHeight();
+    g.clear();
+    drawInstantReading();
+    drawRollingAverages();
+    g.setColor(g.theme.fg);
+    g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
+    g.setColor(g.theme.bg);
+    g.setFont("6x8", 2);
+    g.setFontAlign(0, 0);
+    g.drawString("Pick activity", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
+    g.setColor(g.theme.fg);
+    g.setFontAlign(-1, -1);
+    g.setFont("6x8", 1);
+}
+function onHomeScreenTouch(_button, xy) {
+    if (xy && xy.y >= g.getHeight() - BUTTON_ZONE_HEIGHT) {
+        showActivityPicker();
+    }
+}
+function showHomeScreen() {
+    drawHomeScreen();
+    Bangle.setUI({ mode: "custom", touch: onHomeScreenTouch });
+}
+function drawActivityPicker() {
+    var w = g.getWidth();
+    var h = g.getHeight();
+    var rowH = h / ACTIVITIES.length;
+    g.clear();
+    g.setColor(g.theme.fg);
+    g.setFont("6x8", 2);
+    g.setFontAlign(0, 0);
+    ACTIVITIES.forEach(function (activity, i) {
+        if (i > 0)
+            g.drawLine(0, rowH * i, w, rowH * i);
+        g.drawString(activity, w / 2, rowH * i + rowH / 2);
     });
-    E.showMenu(menu);
+    g.setFontAlign(-1, -1);
+}
+function onActivityPickerTouch(_button, xy) {
+    if (!xy)
+        return;
+    var rowH = g.getHeight() / ACTIVITIES.length;
+    var activity = ACTIVITIES[Math.floor(xy.y / rowH)];
+    if (activity !== undefined)
+        onActivitySelected(activity);
+}
+function onActivityPickerSwipe(directionLR) {
+    if (directionLR === 0)
+        return;
+    startLiveReadingsRedraw();
+    showHomeScreen();
+}
+function showActivityPicker() {
+    stopLiveReadingsRedraw();
+    drawActivityPicker();
+    Bangle.setUI({ mode: "custom", touch: onActivityPickerTouch, swipe: onActivityPickerSwipe });
 }
 function drawActiveSessionScreen(activity) {
     var w = g.getWidth();
@@ -214,11 +267,11 @@ function drawActiveSessionScreen(activity) {
     drawInstantReading();
     drawRollingAverages();
     g.setColor(g.theme.fg);
-    g.fillRect(0, h - STOP_ZONE_HEIGHT, w, h);
+    g.fillRect(0, h - BUTTON_ZONE_HEIGHT, w, h);
     g.setColor(g.theme.bg);
     g.setFont("6x8", 2);
     g.setFontAlign(0, 0);
-    g.drawString("Stop session", w / 2, h - STOP_ZONE_HEIGHT / 2);
+    g.drawString("Stop session", w / 2, h - BUTTON_ZONE_HEIGHT / 2);
     g.setColor(g.theme.fg);
     g.setFontAlign(-1, -1);
     g.setFont("6x8", 1);
@@ -226,30 +279,29 @@ function drawActiveSessionScreen(activity) {
 function showActiveSessionScreen(activity) {
     drawActiveSessionScreen(activity);
     Bangle.setUI({ mode: "custom", touch: onSessionScreenTouch });
-    startLiveReadingsRedraw();
 }
 function onActivitySelected(activity) {
     if (currentActivity !== undefined) {
         console.log("hrsessions: ignored " + activity + " tap - already active: " + currentActivity);
         return;
     }
+    startLiveReadingsRedraw();
     var startedEpochMs = Math.round(Date.now());
-    startSampling(activity, startedEpochMs);
+    startPersistence(activity, startedEpochMs);
     currentActivity = activity;
-    E.showMenu();
     showActiveSessionScreen(activity);
 }
 function onSessionScreenTouch(_button, xy) {
-    if (xy && xy.y >= g.getHeight() - STOP_ZONE_HEIGHT) {
+    if (xy && xy.y >= g.getHeight() - BUTTON_ZONE_HEIGHT) {
         stopSession();
     }
 }
 function stopSession() {
     currentActivity = undefined;
-    stopSampling();
-    stopLiveReadingsRedraw();
-    Bangle.setUI();
-    showActivityMenu();
+    stopPersistence();
+    showHomeScreen();
 }
 Bangle.on("HRM", onHrmSample);
-showActivityMenu();
+startLiveMonitoring();
+startLiveReadingsRedraw();
+showHomeScreen();
