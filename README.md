@@ -4,20 +4,43 @@ Track heart-rate sessions on Bangle.js 2, tagged by activity.
 
 ## Usage
 
-Open the app. With no Session active, a menu of Activities is shown:
-Jogging, Biking, Sleeping, Eating. Selecting one starts a new Session:
-a Session File is created on-watch and tagged with the chosen activity
-and start time, and the live instant heart rate is shown on-screen while
-tracking. Heart-rate samples are periodically saved to the Session File
-as the Session runs. Tap "Stop session" to finalize it — everything
-captured is flushed to the file and the sensor turns off.
+Open the app. With no Session active it shows the home screen: three live
+heart-rate rows — `Now` (instant), `1m` and `10m` (1-minute and 10-minute
+rolling averages) — updating continuously, with a green **Start** button at
+the bottom. The HRM sensor runs whenever the app is open, so the readings
+are live even before a Session begins.
+
+Tap **Start** to open the Activity picker — a scrollable list of activities
+shown in alphabetical order. The list is hard-coded in the `ACTIVITIES`
+array in `app.ts` (the single place to edit it) and sorted for display at
+runtime, so it can be written in any order there. Selecting one starts a new
+Session — a
+Session File is created on-watch and tagged with the chosen activity and
+start time, and the active-session screen shows the activity name above the
+same three live rows. Heart-rate samples are periodically written to the
+Session File as the Session runs, and the file rotates to a new part under
+the same Session before it reaches ~125 KB.
+
+Tap **Stop session** to finalize it: everything captured is flushed to the
+file, a brief "tracked" confirmation appears, and the app returns to the
+home screen (the sensor keeps running for the live readings).
 
 Session Files are CSV, named `hrsessions.log<date><track>.csv`, and
 persist in the watch's storage: the first line is `<activity>,<started-epoch-ms>`,
-and each following line is one `<epoch-ms>,<bpm>` sample.
+and each following line is one `<epoch-ms>,<bpm>` sample. A Session that
+rotated across parts reuses the exact same header line on every part.
 
-Exporting a Session off-watch, and 1-minute/5-minute rolling averages,
-are not implemented yet (planned for later stories).
+## Exporting sessions
+
+The Session Files are plain CSV in the watch's storage, so getting one off
+the watch needs no app-specific tooling: connect with the
+[Espruino Web IDE](https://www.espruino.com/ide/) or the
+[App Loader](https://banglejs.com/apps/) and download `hrsessions.log*.csv`
+from the storage view, then open it in any spreadsheet or text editor.
+
+(For this project's own laptop, `../tools/pull-sessions.js` automates that
+pull over BLE — see `../tools/README.md`. It is a personal helper, not part
+of this app.)
 
 ## Development
 

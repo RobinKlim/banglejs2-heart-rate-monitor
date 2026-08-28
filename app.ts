@@ -40,9 +40,27 @@
 
 // ===== State =====
 
-type Activity = "Jogging" | "Biking" | "Sleeping" | "Eating" | "Walking" | "Swimming";
+type Activity =
+  | "Jogging" | "Biking" | "Sleeping" | "Eating" | "Walking"
+  | "Swimming" | "Meditation" | "Breathing" | "Gym" | "Relaxing";
 
-const ACTIVITIES: Activity[] = ["Jogging", "Biking", "Sleeping", "Eating", "Walking", "Swimming"];
+// The full activity list - where you add, remove, or rename an activity.
+// Written in any order; keep the Activity union above in sync (the build
+// fails right here if a name is missing from it).
+const ACTIVITIES: Activity[] = [
+  "Jogging", "Biking", "Sleeping", "Eating", "Walking",
+  "Swimming", "Meditation", "Breathing", "Gym", "Relaxing",
+];
+// Sorted once at load, so the picker always reads A->Z no matter the order
+// above. drawActivityPicker (render), onActivityPickerTouch (tap hit-test)
+// and onActivityPickerDrag (scroll math) all index into this same array, so
+// one sort here keeps them mutually consistent. Case-insensitive, so a name
+// added in any case (e.g. "yoga") still sorts where you'd expect, not after
+// every capitalised entry.
+ACTIVITIES.sort((a, b) => {
+  const al = a.toLowerCase(), bl = b.toLowerCase();
+  return al < bl ? -1 : al > bl ? 1 : 0;
+});
 
 // Single source of truth for the running Session's activity, set once when
 // a Session starts.

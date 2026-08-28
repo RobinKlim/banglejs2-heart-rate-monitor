@@ -1,4 +1,11 @@
-var ACTIVITIES = ["Jogging", "Biking", "Sleeping", "Eating", "Walking", "Swimming"];
+var ACTIVITIES = [
+    "Jogging", "Biking", "Sleeping", "Eating", "Walking",
+    "Swimming", "Meditation", "Breathing", "Gym", "Relaxing",
+];
+ACTIVITIES.sort(function (a, b) {
+    var al = a.toLowerCase(), bl = b.toLowerCase();
+    return al < bl ? -1 : al > bl ? 1 : 0;
+});
 var currentActivity;
 function openSessionFile(activity, startedEpochMs) {
     var date = new Date().toISOString().substr(0, 10).replace(/-/g, "");
