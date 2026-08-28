@@ -33,6 +33,9 @@ var HR_AVG_1MIN_WINDOW_MS = 60000;
 var HR_AVG_10MIN_WINDOW_MS = HR_BUFFER_WINDOW_MS;
 var HR_FLUSH_INTERVAL_MS = 10000;
 var HR_ROTATION_THRESHOLD_BYTES = 125000;
+var AMBIENT_MIN_SPAN_MS = 60000;
+var AMBIENT_MIN_REAL_SAMPLES = 30;
+var AMBIENT_QUEUE_MAX = 120;
 var hrRingBuffer = [];
 var hrWriteQueue = [];
 var latestBpm;
@@ -43,6 +46,12 @@ var sessionFileNames = [];
 var sessionActivity;
 var sessionStartedEpochMs;
 var currentFileSize = 0;
+var ambientFile;
+var ambientQueue = [];
+var ambientFileSize = 0;
+var ambientOpenEpochMs;
+var ambientRealSamples = 0;
+var ambientFlushId;
 function onHrmSample(hrm) {
     latestBpm = Math.round(hrm.bpm);
 }
@@ -52,8 +61,16 @@ function captureSample() {
     var now = Math.round(Date.now());
     var sample = { t: now, bpm: latestBpm };
     hrRingBuffer.push(sample);
-    if (currentFile !== undefined)
+    if (currentFile !== undefined) {
         hrWriteQueue.push(sample);
+    }
+    else if (ambientOpenEpochMs !== undefined) {
+        ambientQueue.push(sample);
+        if (sample.bpm > 0)
+            ambientRealSamples++;
+        if (ambientQueue.length > AMBIENT_QUEUE_MAX)
+            ambientQueue.shift();
+    }
     var cutoff = now - HR_BUFFER_WINDOW_MS;
     while (hrRingBuffer.length > 0) {
         var oldest = hrRingBuffer[0];
@@ -153,6 +170,81 @@ function stopPersistence() {
     currentFileSize = 0;
     sessionFileNames = [];
     console.log("hrsessions: stopped");
+}
+function openAmbientFile(openEpochMs) {
+    var date = new Date(openEpochMs).toISOString().substr(0, 10).replace(/-/g, "");
+    var prefix = "hrsessions.amb" + date;
+    var existing = require("Storage").list(new RegExp("^" + prefix.replace(/\./g, "\\.")));
+    var maxTrack = -1;
+    for (var i = 0; i < existing.length; i++) {
+        var fname = existing[i];
+        if (fname === undefined)
+            continue;
+        var seg = fname.substring(prefix.length).split(".")[0];
+        var trackVal = parseInt(seg === undefined ? "" : seg, 36);
+        if (!isNaN(trackVal) && trackVal > maxTrack)
+            maxTrack = trackVal;
+    }
+    var track = (maxTrack + 1).toString(36);
+    var name = prefix + track + ".csv";
+    var file = require("Storage").open(name, "w");
+    file.write("ambient," + openEpochMs + "\n");
+    console.log("hrsessions: opened " + name + " (ambient)");
+    return file;
+}
+function rotateAmbientFile() {
+    if (ambientOpenEpochMs === undefined)
+        return;
+    ambientFile = openAmbientFile(ambientOpenEpochMs);
+    ambientFileSize = ambientFile.getLength();
+    console.log("hrsessions: ambient rotated to " + ambientFile.name);
+}
+function flushAmbient() {
+    if (ambientOpenEpochMs === undefined || ambientQueue.length === 0)
+        return;
+    if (ambientFile === undefined) {
+        if (ambientRealSamples < AMBIENT_MIN_REAL_SAMPLES)
+            return;
+        if (Math.round(Date.now()) - ambientOpenEpochMs < AMBIENT_MIN_SPAN_MS)
+            return;
+        ambientFile = openAmbientFile(ambientOpenEpochMs);
+        ambientFileSize = ambientFile.getLength();
+    }
+    var text = "";
+    for (var i = 0; i < ambientQueue.length; i++) {
+        var s = ambientQueue[i];
+        if (s === undefined)
+            continue;
+        text += s.t + "," + s.bpm + "\n";
+    }
+    if (ambientFileSize + text.length > HR_ROTATION_THRESHOLD_BYTES) {
+        rotateAmbientFile();
+    }
+    ambientFile.write(text);
+    ambientFileSize += text.length;
+    console.log("hrsessions: ambient flushed " + ambientQueue.length + " samples");
+    ambientQueue = [];
+}
+function startAmbientSpan() {
+    if (ambientFlushId !== undefined)
+        clearInterval(ambientFlushId);
+    ambientOpenEpochMs = Math.round(Date.now());
+    ambientQueue = [];
+    ambientRealSamples = 0;
+    ambientFileSize = 0;
+    ambientFile = undefined;
+    ambientFlushId = setInterval(flushAmbient, HR_FLUSH_INTERVAL_MS);
+}
+function endAmbientSpan() {
+    if (ambientFlushId !== undefined)
+        clearInterval(ambientFlushId);
+    ambientFlushId = undefined;
+    flushAmbient();
+    ambientFile = undefined;
+    ambientQueue = [];
+    ambientOpenEpochMs = undefined;
+    ambientRealSamples = 0;
+    ambientFileSize = 0;
 }
 var BUTTON_ZONE_HEIGHT = 40;
 var TRACKED_CONFIRMATION_DISMISS_MS = 2500;
@@ -367,6 +459,7 @@ function onActivitySelected(activity) {
     startLiveReadingsRedraw();
     var startedEpochMs = Math.round(Date.now());
     startPersistence(activity, startedEpochMs);
+    endAmbientSpan();
     currentActivity = activity;
     showActiveSessionScreen(activity);
 }
@@ -379,9 +472,11 @@ function stopSession() {
     var stoppedActivity = currentActivity;
     currentActivity = undefined;
     stopPersistence();
+    startAmbientSpan();
     showTrackedConfirmationScreen(stoppedActivity);
 }
 Bangle.on("HRM", onHrmSample);
 startLiveMonitoring();
+startAmbientSpan();
 startLiveReadingsRedraw();
 showHomeScreen();

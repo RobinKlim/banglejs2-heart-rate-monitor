@@ -30,13 +30,27 @@ persist in the watch's storage: the first line is `<activity>,<started-epoch-ms>
 and each following line is one `<epoch-ms>,<bpm>` sample. A Session that
 rotated across parts reuses the exact same header line on every part.
 
+## Ambient tracking
+
+While the app is open with no Session running, heart rate is still saved —
+to an **Ambient File**, one per stretch of no-Session time. A stretch starts
+when the app opens and when a Session stops; it ends when the app closes or a
+Session starts. So one app-open can produce several Ambient Files if you run
+Sessions in between. Same CSV shape as a Session File, named
+`hrsessions.amb<date><track>.csv` with an `ambient,<open-epoch-ms>` first
+line. Short stretches are dropped: no file unless it lasted at least a minute
+*and* the sensor actually locked on. Nothing runs once the app is closed, so
+each Ambient File is final the moment its stretch ends. There's no control
+for this — it's automatic.
+
 ## Exporting sessions
 
-The Session Files are plain CSV in the watch's storage, so getting one off
-the watch needs no app-specific tooling: connect with the
+The Session and Ambient Files are plain CSV in the watch's storage, so
+getting one off the watch needs no app-specific tooling: connect with the
 [Espruino Web IDE](https://www.espruino.com/ide/) or the
 [App Loader](https://banglejs.com/apps/) and download `hrsessions.log*.csv`
-from the storage view, then open it in any spreadsheet or text editor.
+or `hrsessions.amb*.csv` from the storage view, then open it in any
+spreadsheet or text editor.
 
 (For this project's own laptop, `../tools/pull-sessions.js` automates that
 pull over BLE — see `../tools/README.md`. It is a personal helper, not part

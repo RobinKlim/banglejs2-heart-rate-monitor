@@ -118,6 +118,18 @@ const HR_FLUSH_INTERVAL_MS = 10000;
 // ~122KB, comfortably under the epic's ~130KB BLE-transfer memory-crash
 // threshold with margin for the batch that triggers the check.
 const HR_ROTATION_THRESHOLD_BYTES = 125000;
+// Ambient-storage warm-up floor: an app-open span that doesn't clear BOTH of
+// these leaves no file at all - a quick glance at the watch costs zero flash
+// writes. Checked once per flush tick in flushAmbient(), not per sample.
+const AMBIENT_MIN_SPAN_MS = 60000;
+const AMBIENT_MIN_REAL_SAMPLES = 30;
+// Hard cap on the pre-file RAM buffer. Normally the buffer only holds the
+// warm-up window (~60s) before the file opens and drains it, but a span
+// where the sensor never locks on (watch off-wrist, app left open on a
+// table) never opens a file - without this cap ambientQueue would grow ~1
+// entry/sec forever. Oldest entries are dropped past the cap, mirroring the
+// ring buffer; a span that never qualifies produces nothing anyway.
+const AMBIENT_QUEUE_MAX = 120;
 
 // Time-windowed ring buffer of captured samples, the sole source for the
 // live instant reading (and, in Story 1.6, the 1-min/10-min rolling
@@ -162,6 +174,18 @@ let sessionStartedEpochMs: number | undefined;
 // current by adding each flushed batch's length.
 let currentFileSize = 0;
 
+// Ambient storage: a parallel, lighter write path used only while the app is
+// open with NO Session (currentFile === undefined). One immutable CSV per
+// app-open span. Deliberately separate from the Session vars above - the
+// shipped/tested Session path is not touched.
+let ambientFile: StorageFile | undefined;
+let ambientQueue: HrSample[] = [];
+let ambientFileSize = 0;
+let ambientOpenEpochMs: number | undefined;
+// Count of bpm>0 samples seen this span - one half of the warm-up floor.
+let ambientRealSamples = 0;
+let ambientFlushId: IntervalId | undefined;
+
 // Rounded here, once, at the point bpm first enters the system, so every
 // downstream consumer (ring buffer, write queue, persisted CSV rows) sees
 // a clean integer - avoids float noise bloating persisted file size.
@@ -181,11 +205,19 @@ function captureSample(): void {
   const now = Math.round(Date.now());
   const sample: HrSample = { t: now, bpm: latestBpm };
   hrRingBuffer.push(sample);
-  // Only queued for persistence when a Session is actually active
-  // (currentFile !== undefined) - live monitoring (the ring buffer push
-  // above) now runs for the app's whole lifetime, but persistence stays
-  // exactly as narrow in scope as before.
-  if (currentFile !== undefined) hrWriteQueue.push(sample);
+  // Route the sample to whichever write path is live: the Session queue when
+  // a Session is active (currentFile !== undefined), otherwise the ambient
+  // queue while an app-open span is running. The ring-buffer push above is
+  // unconditional - live monitoring runs for the app's whole lifetime.
+  if (currentFile !== undefined) {
+    hrWriteQueue.push(sample);
+  } else if (ambientOpenEpochMs !== undefined) {
+    ambientQueue.push(sample);
+    if (sample.bpm > 0) ambientRealSamples++;
+    // Bound the pre-file buffer: a span whose sensor never locks on never
+    // opens a file, so without this the queue grows without limit.
+    if (ambientQueue.length > AMBIENT_QUEUE_MAX) ambientQueue.shift();
+  }
   const cutoff = now - HR_BUFFER_WINDOW_MS;
   while (hrRingBuffer.length > 0) {
     const oldest = hrRingBuffer[0];
@@ -348,6 +380,103 @@ function stopPersistence(): void {
   currentFileSize = 0;
   sessionFileNames = [];
   console.log("hrsessions: stopped");
+}
+
+// --- Ambient storage (no-Session persistence) ---
+
+// Mirrors openSessionFile()'s gap-safe tracked-name scheme with an "amb"
+// prefix and a fixed "ambient" header marker instead of an Activity. NOT a
+// refactor of openSessionFile - the duplication is deliberate so the shipped
+// Session path stays untouched. Still UTC (the same separately-deferred item
+// as openSessionFile), but derives the date from openEpochMs, not "now", so
+// every part of one span - even one that rotates across midnight - shares a
+// stable prefix and a consistent track set.
+function openAmbientFile(openEpochMs: number): StorageFile {
+  const date = new Date(openEpochMs).toISOString().substr(0, 10).replace(/-/g, "");
+  const prefix = "hrsessions.amb" + date;
+  const existing = require("Storage").list(new RegExp("^" + prefix.replace(/\./g, "\\.")));
+  let maxTrack = -1;
+  for (let i = 0; i < existing.length; i++) {
+    const fname = existing[i];
+    if (fname === undefined) continue;
+    // Parse the whole track segment (prefix .. first "."), not just its first
+    // char - a busy day can produce more than 36 spans, and a one-char base-36
+    // read would then alias "10" back to "1" and collide. Splitting on "." also
+    // drops the ".csv" and any trailing StorageFile marker byte.
+    const seg = fname.substring(prefix.length).split(".")[0];
+    const trackVal = parseInt(seg === undefined ? "" : seg, 36);
+    if (!isNaN(trackVal) && trackVal > maxTrack) maxTrack = trackVal;
+  }
+  const track = (maxTrack + 1).toString(36);
+  const name = prefix + track + ".csv";
+  const file = require("Storage").open(name, "w");
+  file.write("ambient," + openEpochMs + "\n");
+  console.log("hrsessions: opened " + name + " (ambient)");
+  return file;
+}
+
+// Ambient counterpart to rotateSessionFile(): a long open span that crosses
+// the size ceiling continues in a new tracked file, same "ambient,<openEpochMs>"
+// header. No-ops outside an active span.
+function rotateAmbientFile(): void {
+  if (ambientOpenEpochMs === undefined) return;
+  ambientFile = openAmbientFile(ambientOpenEpochMs);
+  ambientFileSize = ambientFile.getLength();
+  console.log("hrsessions: ambient rotated to " + (ambientFile as any).name);
+}
+
+// Ambient counterpart to flushSamples(). Two differences: (1) the warm-up
+// floor gate at the top - until the span clears BOTH thresholds, samples stay
+// in ambientQueue and nothing is written to flash; (2) it opens its own file
+// lazily, on the first flush that qualifies.
+function flushAmbient(): void {
+  if (ambientOpenEpochMs === undefined || ambientQueue.length === 0) return;
+  if (ambientFile === undefined) {
+    if (ambientRealSamples < AMBIENT_MIN_REAL_SAMPLES) return;
+    if (Math.round(Date.now()) - ambientOpenEpochMs < AMBIENT_MIN_SPAN_MS) return;
+    ambientFile = openAmbientFile(ambientOpenEpochMs);
+    ambientFileSize = ambientFile.getLength();
+  }
+  let text = "";
+  for (let i = 0; i < ambientQueue.length; i++) {
+    const s = ambientQueue[i];
+    if (s === undefined) continue;
+    text += s.t + "," + s.bpm + "\n";
+  }
+  if (ambientFileSize + text.length > HR_ROTATION_THRESHOLD_BYTES) {
+    rotateAmbientFile();
+  }
+  ambientFile!.write(text);
+  ambientFileSize += text.length;
+  console.log("hrsessions: ambient flushed " + ambientQueue.length + " samples");
+  ambientQueue = [];
+}
+
+// Begins a new app-open span: fresh open epoch, empty buffer, floor re-armed,
+// no file yet. Called at app launch and after a Session stops. Mirrors
+// startPersistence() but never touches the HRM sensor or Session state.
+function startAmbientSpan(): void {
+  if (ambientFlushId !== undefined) clearInterval(ambientFlushId); // defensive: never leak a timer
+  ambientOpenEpochMs = Math.round(Date.now());
+  ambientQueue = [];
+  ambientRealSamples = 0;
+  ambientFileSize = 0;
+  ambientFile = undefined;
+  ambientFlushId = setInterval(flushAmbient, HR_FLUSH_INTERVAL_MS);
+}
+
+// Ends the current span: stop the flush timer, one final flush (which may
+// legitimately be the one that crosses the floor for a >=60s span ending as a
+// Session starts), then drop all span state. Mirrors stopPersistence().
+function endAmbientSpan(): void {
+  if (ambientFlushId !== undefined) clearInterval(ambientFlushId);
+  ambientFlushId = undefined;
+  flushAmbient();
+  ambientFile = undefined;
+  ambientQueue = [];
+  ambientOpenEpochMs = undefined;
+  ambientRealSamples = 0;
+  ambientFileSize = 0;
 }
 
 // ===== UI =====
@@ -719,6 +848,10 @@ function onActivitySelected(activity: Activity): void {
   startLiveReadingsRedraw(); // resume, paused by showActivityPicker()
   const startedEpochMs = Math.round(Date.now());
   startPersistence(activity, startedEpochMs);
+  // End the ambient span AFTER startPersistence: if it throws, the ambient
+  // span is left running untouched. captureSample() already routes to the
+  // Session queue the instant currentFile is set, so no sample is lost here.
+  endAmbientSpan();
   currentActivity = activity;
   showActiveSessionScreen(activity);
 }
@@ -745,6 +878,7 @@ function stopSession(): void {
   const stoppedActivity = currentActivity!;
   currentActivity = undefined;
   stopPersistence();
+  startAmbientSpan(); // app is still open with no Session - resume ambient capture
   showTrackedConfirmationScreen(stoppedActivity);
 }
 
@@ -759,5 +893,6 @@ Bangle.on("HRM", onHrmSample);
 // shown first; selecting an activity starts persistence on top of the
 // already-running live monitoring.
 startLiveMonitoring();
+startAmbientSpan();
 startLiveReadingsRedraw();
 showHomeScreen();

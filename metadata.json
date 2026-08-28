@@ -11,6 +11,7 @@
     {"name":"hrsessions.app.js","url":"app.js"}
   ],
   "data": [
-    {"wildcard":"hrsessions.log*.csv","storageFile":true}
+    {"wildcard":"hrsessions.log*.csv","storageFile":true},
+    {"wildcard":"hrsessions.amb*.csv","storageFile":true}
   ]
 }
