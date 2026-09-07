@@ -56,6 +56,50 @@ spreadsheet or text editor.
 pull over BLE — see `../tools/README.md`. It is a personal helper, not part
 of this app.)
 
+## Installing permanently
+
+By default `app.js` only ever reaches the watch as a RAM-upload from the
+Espruino Web IDE's dev loop — it vanishes on reboot and never shows up in
+the launcher. To install `hrsessions` for real (survives reboot, appears in
+the launcher with its icon), write the app's files directly to the watch's
+Storage. This is a one-time hand install — this app is private-only, so
+there's no App Loader listing or install link, and the App Loader tooling
+itself isn't used here either.
+
+1. Open the [Espruino Web IDE](https://www.espruino.com/ide/) and connect
+   to the watch.
+2. Open the Storage pane (the tab showing the watch's files) and upload
+   two files: this repo's `app.js`, using the Storage pane's "upload as" /
+   rename option to write it to Storage as `hrsessions.app.js` (matching
+   the `storage` entry in `metadata.json` — the launcher's `.info` file
+   points at this name, so it must land under it, not as plain `app.js`);
+   and `hrsessions.info`, uploaded as-is under its own name. Note
+   `app.png` is not part of this on-watch install at all — it's a
+   repo/README preview image only; the on-watch icon comes from
+   `hrsessions.img`, written in the next step.
+3. Write the icon once: open the IDE's left-hand REPL (still connected to
+   the watch) and paste in the entire contents of `app-icon.js`, then
+   press enter. The paste itself writes `hrsessions.img` to Storage as its
+   last step — there's nothing to copy out of the console by hand. The
+   final line it prints is the result of a sanity check
+   (`require("Storage").read("hrsessions.img").length`): a plausible
+   positive number (roughly in the hundreds of bytes for a 48×48 1bpp
+   image) means the write succeeded; `undefined` or a suspiciously small
+   number means re-paste the file.
+4. Reboot the watch, or close and reopen the launcher. `HR Sessions`
+   should now appear with the heart icon, and opening it should work
+   exactly as it did from a RAM upload.
+5. Sanity check: any existing `hrsessions.log*.csv` (Session Files) and
+   `hrsessions.amb*.csv` (Ambient Files) already in Storage should still
+   be listed, untouched, in the Storage pane.
+
+To reinstall after a code change: repeat step 2 with the freshly built
+`app.js` (step 3 only needs re-running if the icon itself changes). On any
+future version bump, also update the matching `id`/`name`/`shortName`/
+`version`/`src`/`type` fields in `hrsessions.info` (nothing currently keeps
+it in sync with `metadata.json` automatically) and re-upload it alongside
+`app.js`.
+
 ## Development
 
 Source is TypeScript, compiled via the vendored `typescript/` build
